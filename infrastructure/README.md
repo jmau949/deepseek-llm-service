@@ -62,15 +62,12 @@ The ECR repository is a critical component of the infrastructure:
 
 ### Initial Setup
 
-1. Create the ECR repository manually (required before first deployment):
-   ```bash
-   aws ecr create-repository --repository-name llm-service
-   ```
 
-2. Add a GitHub Personal Access Token to AWS Secrets Manager with the name `deepseek-llm-service-pat` and key `github-token`
+1. Add a GitHub Personal Access Token to AWS Secrets Manager with the name `deepseek-llm-service-pat` and key `github-token`
 
-3. Deploy the CI/CD pipeline stack:
+2. Deploy the CI/CD pipeline stack:
    ```bash
+   npm run build
    npx cdk deploy LlmServiceCicdPipelineStack
    ```
 
@@ -86,17 +83,6 @@ The ECR repository is a critical component of the infrastructure:
 4. The infrastructure stack is deployed or updated
 5. EC2 instances pull the latest image and run the service
 
-### Manual Deployment Options
-
-For testing or initial deployment without using the pipeline:
-
-```bash
-# Set environment variable to enable manual deployment
-export MANUAL_DEPLOY=true
-
-# Deploy the infrastructure stack directly
-npx cdk deploy LlmServiceInfraStack
-```
 
 ## Fixing the Docker Build Issue
 

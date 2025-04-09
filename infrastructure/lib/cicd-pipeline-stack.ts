@@ -110,7 +110,7 @@ export class CicdPipelineStack extends cdk.Stack {
           phases: {
             install: {
               commands: [
-                "npm install -g n",
+                "which n || npm install -g n",
                 "n 18",
                 "node --version",
                 "npm install -g aws-cdk",
@@ -121,7 +121,7 @@ export class CicdPipelineStack extends cdk.Stack {
             build: {
               commands: [
                 "echo Deploying infrastructure...",
-                "npx cdk deploy LlmServiceInfraStack --require-approval never",
+                "cd infrastructure && npx cdk deploy LlmServiceInfraStack --require-approval never",
               ],
             },
           },
