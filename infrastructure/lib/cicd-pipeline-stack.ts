@@ -139,7 +139,12 @@ export class CicdPipelineStack extends cdk.Stack {
           repo: "deepseek-llm-service", // Replace with your repository name
           branch: "main",
           output: sourceOutput,
-          oauthToken: cdk.SecretValue.secretsManager("github-token"), // Create this secret in AWS Secrets Manager
+          oauthToken: cdk.SecretValue.secretsManager(
+            "deepseek-llm-service-pat",
+            {
+              jsonField: "github-token",
+            }
+          ), // Using the key/value secret
         }),
       ],
     });
