@@ -190,3 +190,11 @@ docker-compose.override.yml
 # OS specific
 .DS_Store
 Thumbs.db
+*.js
+!jest.config.js
+*.d.ts
+node_modules
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
