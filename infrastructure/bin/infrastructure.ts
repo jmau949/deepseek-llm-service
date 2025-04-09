@@ -1,20 +1,30 @@
 #!/usr/bin/env node
-import * as cdk from 'aws-cdk-lib';
-import { InfrastructureStack } from '../lib/infrastructure-stack';
+import "source-map-support/register";
+import * as cdk from "aws-cdk-lib";
+import { LlmServiceInfraStack } from "../lib/llm-service-infra-stack";
+import { CicdPipelineStack } from "../lib/cicd-pipeline-stack";
 
 const app = new cdk.App();
-new InfrastructureStack(app, 'InfrastructureStack', {
-  /* If you don't specify 'env', this stack will be environment-agnostic.
-   * Account/Region-dependent features and context lookups will not work,
-   * but a single synthesized template can be deployed anywhere. */
 
-  /* Uncomment the next line to specialize this stack for the AWS Account
-   * and Region that are implied by the current CLI configuration. */
-  // env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
-
-  /* Uncomment the next line if you know exactly what Account and Region you
-   * want to deploy the stack to. */
-  // env: { account: '123456789012', region: 'us-east-1' },
-
-  /* For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html */
+// Deploy CI/CD pipeline stack
+new CicdPipelineStack(app, "LlmServiceCicdPipelineStack", {
+  env: {
+    account: process.env.CDK_DEFAULT_ACCOUNT,
+    region: process.env.CDK_DEFAULT_REGION,
+  },
+  description: "CI/CD pipeline for LLM Service",
 });
+
+// Deploy infrastructure stack (this is typically deployed by the pipeline)
+// Only include this for initial deployment or testing
+if (process.env.MANUAL_DEPLOY === "true") {
+  new LlmServiceInfraStack(app, "LlmServiceInfraStack", {
+    env: {
+      account: process.env.CDK_DEFAULT_ACCOUNT,
+      region: process.env.CDK_DEFAULT_REGION,
+    },
+    description: "Infrastructure for LLM Service",
+  });
+}
+
+app.synth();
