@@ -5,7 +5,7 @@ import { LlmServiceInfraStack } from "../lib/llm-service-infra-stack";
 import { CicdPipelineStack } from "../lib/cicd-pipeline-stack";
 
 const app = new cdk.App();
-
+console.log("CDK_DEFAULT_REGION", process.env.CDK_DEFAULT_REGION);
 // Deploy CI/CD pipeline stack
 new CicdPipelineStack(app, "LlmServiceCicdPipelineStack", {
   env: {

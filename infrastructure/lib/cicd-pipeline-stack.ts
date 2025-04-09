@@ -96,6 +96,16 @@ export class CicdPipelineStack extends cdk.Stack {
         environment: {
           buildImage: codebuild.LinuxBuildImage.STANDARD_5_0,
         },
+        environmentVariables: {
+          IMAGE_URI: {
+            value: buildOutput.artifactName,
+            type: codebuild.BuildEnvironmentVariableType.PLAINTEXT,
+          },
+          ECR_REPOSITORY_URI: {
+            value: ecrRepository.repositoryUri,
+            type: codebuild.BuildEnvironmentVariableType.PLAINTEXT,
+          },
+        },
         buildSpec: codebuild.BuildSpec.fromObject({
           version: "0.2",
           phases: {
@@ -109,7 +119,7 @@ export class CicdPipelineStack extends cdk.Stack {
             build: {
               commands: [
                 "echo Deploying infrastructure...",
-                "cdk deploy LlmServiceInfraStack --require-approval never",
+                "npx cdk deploy LlmServiceInfraStack --require-approval never",
               ],
             },
           },
@@ -129,7 +139,6 @@ export class CicdPipelineStack extends cdk.Stack {
     });
 
     // Add source stage - using GitHub as the source
-    // You'll need to connect your GitHub repository to CodePipeline
     pipeline.addStage({
       stageName: "Source",
       actions: [
@@ -144,7 +153,7 @@ export class CicdPipelineStack extends cdk.Stack {
             {
               jsonField: "github-token",
             }
-          ), // Using the key/value secret
+          ),
         }),
       ],
     });
@@ -170,11 +179,7 @@ export class CicdPipelineStack extends cdk.Stack {
           actionName: "DeployStack",
           project: deployProject,
           input: sourceOutput,
-          environmentVariables: {
-            IMAGE_URI: {
-              value: buildOutput.getParam("imageDefinition.json", "ImageURI"),
-            },
-          },
+          // No environmentVariables in the action, they're in the project definition
         }),
       ],
     });
