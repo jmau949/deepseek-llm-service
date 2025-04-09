@@ -120,8 +120,8 @@ export class LlmServiceInfraStack extends cdk.Stack {
       {
         machineImage: ec2.MachineImage.latestAmazonLinux2(),
         instanceType: ec2.InstanceType.of(
-          ec2.InstanceClass.C5,
-          ec2.InstanceSize.XLARGE
+          ec2.InstanceClass.T3,
+          ec2.InstanceSize.MICRO
         ),
         userData,
         securityGroup: llmServiceSg,
@@ -133,9 +133,9 @@ export class LlmServiceInfraStack extends cdk.Stack {
     const asg = new autoscaling.AutoScalingGroup(this, "LlmServiceAsg", {
       vpc,
       launchTemplate,
-      minCapacity: 1,
-      maxCapacity: 2,
-      desiredCapacity: 1,
+      minCapacity: 2,
+      maxCapacity: 4,
+      desiredCapacity: 2,
       spotPrice: "0.50", // Set a maximum spot price (adjust based on market prices)
       instanceMonitoring: autoscaling.Monitoring.DETAILED, // Enable detailed CloudWatch monitoring
       healthCheck: autoscaling.HealthCheck.ec2({
