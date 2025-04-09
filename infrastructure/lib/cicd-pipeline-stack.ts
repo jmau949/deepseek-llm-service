@@ -10,17 +10,12 @@ export class CicdPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // Create an ECR repository for the Docker images
-    const ecrRepository = new ecr.Repository(this, "LlmServiceEcrRepository", {
-      repositoryName: "llm-service",
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      lifecycleRules: [
-        {
-          maxImageCount: 10,
-          description: "Only keep 10 latest images",
-        },
-      ],
-    });
+    // Import the existing ECR repository instead of creating a new one
+    const ecrRepository = ecr.Repository.fromRepositoryName(
+      this,
+      "LlmServiceEcrRepository",
+      "llm-service"
+    );
 
     // Define the artifact for source code
     const sourceOutput = new codepipeline.Artifact("SourceCode");
@@ -132,9 +127,9 @@ export class CicdPipelineStack extends cdk.Stack {
       iam.ManagedPolicy.fromAwsManagedPolicyName("AdministratorAccess")
     );
 
-    // Create the pipeline
+    // Create the pipeline with a unique name
     const pipeline = new codepipeline.Pipeline(this, "LlmServicePipeline", {
-      pipelineName: "LlmServicePipeline",
+      pipelineName: "LlmServicePipeline-v1",
       restartExecutionOnUpdate: true,
     });
 
@@ -144,9 +139,9 @@ export class CicdPipelineStack extends cdk.Stack {
       actions: [
         new codepipeline_actions.GitHubSourceAction({
           actionName: "GitHub",
-          owner: "jmau949", // Replace with your GitHub username
-          repo: "deepseek-llm-service", // Replace with your repository name
-          branch: "main",
+          owner: "jmau949", // Replace this with your actual GitHub username
+          repo: "deepseek-llm-service", // Replace this with your actual repository name
+          branch: "master",
           output: sourceOutput,
           oauthToken: cdk.SecretValue.secretsManager(
             "deepseek-llm-service-pat",
