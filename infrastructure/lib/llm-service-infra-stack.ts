@@ -32,11 +32,6 @@ export class LlmServiceInfraStack extends cdk.Stack {
     const service = namespace.createService("LlmService", {
       dnsRecordType: servicediscovery.DnsRecordType.A,
       dnsTtl: cdk.Duration.seconds(10),
-      healthCheck: {
-        type: servicediscovery.HealthCheckType.TCP,
-        resourcePath: "/",
-        failureThreshold: 2,
-      },
     });
 
     // Security group for LLM service instances
@@ -126,6 +121,10 @@ export class LlmServiceInfraStack extends cdk.Stack {
         userData,
         securityGroup: llmServiceSg,
         role: instanceRole,
+        spotOptions: {
+          requestType: ec2.SpotRequestType.ONE_TIME,
+          maxPrice: 0.006, // Very low spot price for t3.micro instances
+        },
       }
     );
 
@@ -136,7 +135,6 @@ export class LlmServiceInfraStack extends cdk.Stack {
       minCapacity: 1,
       maxCapacity: 2,
       desiredCapacity: 1,
-      spotPrice: "0.0060", // Very low spot price for t3.micro instances
       instanceMonitoring: autoscaling.Monitoring.BASIC, // Use basic monitoring to save costs
       healthCheck: autoscaling.HealthCheck.ec2({
         grace: cdk.Duration.minutes(5),
