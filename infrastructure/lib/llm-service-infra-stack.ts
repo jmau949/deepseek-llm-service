@@ -14,7 +14,48 @@ export class LlmServiceInfraStack extends cdk.Stack {
     // Create a VPC
     const vpc = new ec2.Vpc(this, "LlmServiceVpc", {
       maxAzs: 2,
-      natGateways: 1,
+      natGateways: 0,
+      subnetConfiguration: [
+        {
+          name: "private",
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+          cidrMask: 24,
+        },
+      ],
+    });
+
+    // Add VPC Endpoint for ECR and other AWS services
+    vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
+      service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+    });
+
+    vpc.addInterfaceEndpoint("EcrEndpoint", {
+      service: ec2.InterfaceVpcEndpointAwsService.ECR,
+    });
+
+    vpc.addInterfaceEndpoint("CloudWatchEndpoint", {
+      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH,
+    });
+
+    vpc.addInterfaceEndpoint("CloudWatchLogsEndpoint", {
+      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+    });
+
+    vpc.addInterfaceEndpoint("SsmEndpoint", {
+      service: ec2.InterfaceVpcEndpointAwsService.SSM,
+    });
+
+    vpc.addGatewayEndpoint("S3Endpoint", {
+      service: ec2.GatewayVpcEndpointAwsService.S3,
+    });
+
+    // Add interface endpoint for AWS API calls (for servicediscovery)
+    new ec2.InterfaceVpcEndpoint(this, "ServiceDiscoveryEndpoint", {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService(
+        "com.amazonaws." + this.region + ".servicediscovery"
+      ),
+      privateDnsEnabled: true,
     });
 
     // Create Cloud Map namespace for service discovery
