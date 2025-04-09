@@ -15,16 +15,13 @@ new CicdPipelineStack(app, "LlmServiceCicdPipelineStack", {
   description: "CI/CD pipeline for LLM Service",
 });
 
-// Deploy infrastructure stack (this is typically deployed by the pipeline)
-// Only include this for initial deployment or testing
-if (process.env.MANUAL_DEPLOY === "true") {
-  new LlmServiceInfraStack(app, "LlmServiceInfraStack", {
-    env: {
-      account: process.env.CDK_DEFAULT_ACCOUNT,
-      region: process.env.CDK_DEFAULT_REGION,
-    },
-    description: "Infrastructure for LLM Service",
-  });
-}
+// Deploy infrastructure stack
+new LlmServiceInfraStack(app, "LlmServiceInfraStack", {
+  env: {
+    account: process.env.CDK_DEFAULT_ACCOUNT,
+    region: process.env.CDK_DEFAULT_REGION,
+  },
+  description: "Infrastructure for LLM Service",
+});
 
 app.synth();

@@ -29,7 +29,7 @@ export class CicdPipelineStack extends cdk.Stack {
       "LlmServiceBuild",
       {
         environment: {
-          buildImage: codebuild.LinuxBuildImage.STANDARD_5_0,
+          buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
           privileged: true, // Required for Docker builds
         },
         environmentVariables: {
@@ -92,7 +92,8 @@ export class CicdPipelineStack extends cdk.Stack {
       "LlmServiceDeploy",
       {
         environment: {
-          buildImage: codebuild.LinuxBuildImage.STANDARD_5_0,
+          buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
+          privileged: true,
         },
         environmentVariables: {
           IMAGE_URI: {
@@ -109,6 +110,9 @@ export class CicdPipelineStack extends cdk.Stack {
           phases: {
             install: {
               commands: [
+                "npm install -g n",
+                "n 18",
+                "node --version",
                 "npm install -g aws-cdk",
                 "cd infrastructure",
                 "npm install",
