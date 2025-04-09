@@ -50,6 +50,14 @@ export class CicdPipelineStack extends cdk.Stack {
               commands: [
                 "echo Logging in to Amazon ECR...",
                 "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com",
+                "echo Configuring Docker to use ECR pull-through cache...",
+                "mkdir -p $HOME/.docker",
+                'echo \'{"credHelpers":{"$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com":"ecr-login"}}\' > $HOME/.docker/config.json',
+                'echo \'{"registry-mirrors": ["https://$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub"]}\' > /tmp/daemon.json',
+                "sudo cp /tmp/daemon.json /etc/docker/daemon.json || (sudo mkdir -p /etc/docker && sudo cp /tmp/daemon.json /etc/docker/daemon.json)",
+                "sudo systemctl restart docker || (echo 'Docker service not found, trying to restart Docker daemon in other ways' && sudo service docker restart || sudo dockerd &)",
+                "sleep 3", // Give Docker time to restart
+                "docker info | grep 'Registry Mirrors' || echo 'Warning: Registry mirrors not configured properly'",
                 "COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)",
                 "IMAGE_TAG=${COMMIT_HASH:=latest}",
                 "echo Repository structure for debugging:",
