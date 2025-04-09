@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package llm;
+
+// LLM service definition
+service LLMService {
+  // Generate a response in a streaming fashion
+  rpc GenerateStream (LLMRequest) returns (stream LLMResponse);
+  
+  // Generate a complete response without streaming (optional)
+  rpc Generate (LLMRequest) returns (LLMCompleteResponse);
+}
+
+// Request message containing the prompt and parameters
+message LLMRequest {
+  // The prompt to send to the LLM
+  string prompt = 1;
+  
+  // Model parameters
+  message Parameters {
+    // Temperature parameter, controls randomness (0.0 to 1.0)
+    float temperature = 1;
+    
+    // Maximum number of tokens to generate
+    int32 max_tokens = 2;
+    
+    // Top-p parameter for nucleus sampling (0.0 to 1.0)
+    float top_p = 3;
+    
+    // Presence penalty to prevent repeating topics (0.0 to 1.0)
+    float presence_penalty = 4;
+    
+    // Frequency penalty to prevent repeating n-grams (0.0 to 1.0)
+    float frequency_penalty = 5;
+  }
+  
+  // Parameters for the generation
+  Parameters parameters = 2;
+}
+
+// Streaming response message containing a chunk of the generated text
+message LLMResponse {
+  // The chunk of text generated
+  string text = 1;
+  
+  // Whether this is the final chunk
+  bool is_complete = 2;
+}
+
+// Complete response message containing the entire generated text
+message LLMCompleteResponse {
+  // The complete generated text
+  string text = 1;
+}
