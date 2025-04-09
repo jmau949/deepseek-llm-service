@@ -24,17 +24,19 @@ The ECR repository is a critical component of the infrastructure:
 
 - **Repository Name**: `llm-service`
 - **Repository URI Format**: `${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/llm-service`
+- **Creation**: The ECR repository is referenced in the pipeline stack (not created) and should already exist before the pipeline stack deployment
 
 ### How the ECR Process Works
 
 1. **Image Building**:
    - The CI/CD pipeline automatically builds a Docker image when changes are pushed to the GitHub repository
    - The build process uses a CodeBuild project with Docker capabilities
-   - The Dockerfile is located in the `service/` directory of the repository
-   - CodeBuild executes the build from the repository root using: `docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .`
-   - The build uses a multi-stage process defined in `service/Dockerfile`:
-     - First stage installs dependencies and generates Protocol Buffer code
-     - Second stage creates the final lightweight image with only necessary components
+   - **Important**: The Dockerfile is located in the `service/` directory of the repository, but the CodeBuild project looks for it at the repository root
+   - The command executed is: `docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .` from the repository root
+   - **Note**: If builds are failing, ensure one of the following:
+     - Move the Dockerfile to the repository root, OR
+     - Modify the CodeBuild buildspec to change directory to service/ before building, OR
+     - Update the build command to specify the Dockerfile path: `docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG -f service/Dockerfile .`
    - Each image is tagged with both the Git commit hash (short form) and `latest`
 
 2. **Image Storage**:
@@ -76,10 +78,11 @@ The ECR repository is a critical component of the infrastructure:
 
 1. Changes pushed to the GitHub repository trigger the pipeline
 2. The pipeline pulls the source code
-3. CodeBuild builds the Docker image using the Dockerfile in the service/ directory
+3. CodeBuild builds the Docker image:
    - Pre-build: Authenticates with ECR and prepares image tags
-   - Build: Builds the Docker image with the commit hash tag and 'latest' tag
-   - Post-build: Pushes both tagged images to ECR
+   - Build: Attempts to build the Docker image with the commit hash tag and 'latest' tag
+   - **Issue Alert**: By default, CodeBuild looks for the Dockerfile in the root directory, but it's actually in the service/ directory
+   - Post-build (if successful): Pushes both tagged images to ECR
 4. The infrastructure stack is deployed or updated
 5. EC2 instances pull the latest image and run the service
 
@@ -94,6 +97,34 @@ export MANUAL_DEPLOY=true
 # Deploy the infrastructure stack directly
 npx cdk deploy LlmServiceInfraStack
 ```
+
+## Fixing the Docker Build Issue
+
+To resolve the issue with CodeBuild not finding the Dockerfile, you have three options:
+
+1. **Update the BuildSpec**: Modify the CI/CD pipeline stack to change the build command:
+   ```typescript
+   // In cicd-pipeline-stack.ts, modify the build commands section:
+   build: {
+     commands: [
+       "echo Build started on `date`",
+       "echo Building the Docker image...",
+       // Specify the Dockerfile location
+       "docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG -f service/Dockerfile .",
+       // Alternative approach
+       // "cd service && docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .",
+       "docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:latest",
+     ],
+   },
+   ```
+
+2. **Copy/Move Dockerfile**: Create a Dockerfile in the root that references the service Dockerfile:
+   ```dockerfile
+   # Root Dockerfile
+   FROM service/Dockerfile
+   ```
+
+3. **Repository Restructuring**: Move the Dockerfile to the repository root (least recommended)
 
 ## Service Docker Image
 
@@ -171,9 +202,10 @@ You can customize the deployment by modifying:
    - Ensure instance has internet access for pulling images
 
 3. **Image Build Failures**:
-   - Review CodeBuild logs for specific errors
-   - Check Docker build context and Dockerfile syntax
-   - Verify the Dockerfile in the service/ directory is valid
+   - Check if the Dockerfile path is correct in the build command
+   - Verify that all files referenced in the Dockerfile exist
+   - Check CodeBuild logs for specific error messages
+   - Ensure the ECR repository exists before running the pipeline
 
 ## Future Improvements
 
