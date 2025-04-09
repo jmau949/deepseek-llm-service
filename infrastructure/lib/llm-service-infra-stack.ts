@@ -23,6 +23,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
           cidrMask: 24,
         },
       ],
+      // Default security group will be restricted as a security best practice
     });
 
     // Only keep essential VPC endpoints

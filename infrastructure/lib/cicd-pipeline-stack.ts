@@ -145,8 +145,50 @@ export class CicdPipelineStack extends cdk.Stack {
     );
 
     // Grant permissions to the deploy project
-    deployProject.role?.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName("AdministratorAccess")
+    const deployRole = deployProject.role!;
+    // Remove the administrator access policy
+    // deployProject.role?.addManagedPolicy(
+    //   iam.ManagedPolicy.fromAwsManagedPolicyName("AdministratorAccess")
+    // );
+
+    // Add specific permissions required for deployment
+    deployRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          // Allow CDK to deploy CloudFormation stacks
+          "cloudformation:*",
+
+          // Allow access to S3 for assets
+          "s3:*",
+
+          // Allow managing IAM roles and policies for resources
+          "iam:*",
+
+          // Allow managing EC2 resources including security groups
+          "ec2:*",
+
+          // Allow managing Auto Scaling Groups
+          "autoscaling:*",
+
+          // Allow managing CloudWatch resources
+          "cloudwatch:*",
+          "logs:*",
+
+          // Allow managing Cloud Map resources
+          "servicediscovery:*",
+
+          // Allow managing Lambda functions
+          "lambda:*",
+
+          // Allow ECR access
+          "ecr:*",
+
+          // Allow managing custom resources and SSM parameters
+          "ssm:*",
+        ],
+        resources: ["*"],
+      })
     );
 
     // Create the pipeline
