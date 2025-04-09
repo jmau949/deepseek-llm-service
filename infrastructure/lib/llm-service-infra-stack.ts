@@ -133,11 +133,11 @@ export class LlmServiceInfraStack extends cdk.Stack {
     const asg = new autoscaling.AutoScalingGroup(this, "LlmServiceAsg", {
       vpc,
       launchTemplate,
-      minCapacity: 2,
-      maxCapacity: 4,
-      desiredCapacity: 2,
-      spotPrice: "0.50", // Set a maximum spot price (adjust based on market prices)
-      instanceMonitoring: autoscaling.Monitoring.DETAILED, // Enable detailed CloudWatch monitoring
+      minCapacity: 1,
+      maxCapacity: 2,
+      desiredCapacity: 1,
+      spotPrice: "0.0060", // Very low spot price for t3.micro instances
+      instanceMonitoring: autoscaling.Monitoring.BASIC, // Use basic monitoring to save costs
       healthCheck: autoscaling.HealthCheck.ec2({
         grace: cdk.Duration.minutes(5),
       }),
