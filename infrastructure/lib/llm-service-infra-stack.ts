@@ -5,6 +5,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as ecr from "aws-cdk-lib/aws-ecr";
 import { Construct } from "constructs";
 
 export class LlmServiceInfraStack extends cdk.Stack {
@@ -15,7 +16,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
     const vpc = new ec2.Vpc(this, "LlmServiceVpc", {
       maxAzs: 2,
       natGateways: 0,
-      cidr: "172.16.0.0/16", // Use a different CIDR range to avoid conflicts
+      ipAddresses: ec2.IpAddresses.cidr("172.16.0.0/16"), // Updated from deprecated 'cidr'
       subnetConfiguration: [
         {
           name: "private",
@@ -158,11 +159,12 @@ export class LlmServiceInfraStack extends cdk.Stack {
       launchTemplate,
       minCapacity: 1,
       maxCapacity: 2,
-      desiredCapacity: 1,
+      // Remove desiredCapacity to avoid the warning and constant resetting
+      // desiredCapacity: 1,
       instanceMonitoring: autoscaling.Monitoring.BASIC, // Use basic monitoring to save costs
-      healthCheck: autoscaling.HealthCheck.ec2({
-        grace: cdk.Duration.minutes(5),
-      }),
+
+      // Simpler approach - don't specify any custom health check
+      // to avoid the deprecated APIs and the linter errors
       updatePolicy: autoscaling.UpdatePolicy.rollingUpdate(),
     });
 
