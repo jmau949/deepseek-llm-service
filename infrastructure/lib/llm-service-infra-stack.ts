@@ -15,6 +15,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
     const vpc = new ec2.Vpc(this, "LlmServiceVpc", {
       maxAzs: 2,
       natGateways: 0,
+      cidr: "172.16.0.0/16", // Use a different CIDR range to avoid conflicts
       subnetConfiguration: [
         {
           name: "private",
@@ -24,25 +25,13 @@ export class LlmServiceInfraStack extends cdk.Stack {
       ],
     });
 
-    // Add VPC Endpoint for ECR and other AWS services
+    // Only keep essential VPC endpoints
     vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
       service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
     });
 
     vpc.addInterfaceEndpoint("EcrEndpoint", {
       service: ec2.InterfaceVpcEndpointAwsService.ECR,
-    });
-
-    vpc.addInterfaceEndpoint("CloudWatchEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH,
-    });
-
-    vpc.addInterfaceEndpoint("CloudWatchLogsEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
-    });
-
-    vpc.addInterfaceEndpoint("SsmEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.SSM,
     });
 
     vpc.addGatewayEndpoint("S3Endpoint", {
@@ -92,20 +81,17 @@ export class LlmServiceInfraStack extends cdk.Stack {
     // Create IAM role for EC2 instances
     const instanceRole = new iam.Role(this, "LlmServiceInstanceRole", {
       assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName(
-          "AmazonSSMManagedInstanceCore"
-        ),
-        iam.ManagedPolicy.fromAwsManagedPolicyName(
-          "CloudWatchAgentServerPolicy"
-        ),
-      ],
+      managedPolicies: [],
     });
 
-    // Add permissions to register with Cloud Map
+    // Add permissions to use ECR and register with Cloud Map
     instanceRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: [
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetAuthorizationToken",
           "servicediscovery:RegisterInstance",
           "servicediscovery:DeregisterInstance",
           "servicediscovery:DiscoverInstances",
@@ -121,10 +107,6 @@ export class LlmServiceInfraStack extends cdk.Stack {
       "yum install -y docker",
       "systemctl start docker",
       "systemctl enable docker",
-
-      // Install AWS CloudWatch agent
-      "yum install -y amazon-cloudwatch-agent",
-      "systemctl start amazon-cloudwatch-agent",
 
       // Pull and run the LLM service container
       "aws ecr get-login-password --region " +
