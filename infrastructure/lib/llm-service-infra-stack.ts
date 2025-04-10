@@ -14,7 +14,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
 
     // Create a VPC
     const vpc = new ec2.Vpc(this, "LlmServiceVpc", {
-      maxAzs: 2,
+      maxAzs: 1,
       natGateways: 0,
       ipAddresses: ec2.IpAddresses.cidr("172.16.0.0/16"), // Updated from deprecated 'cidr'
       subnetConfiguration: [
@@ -49,21 +49,37 @@ export class LlmServiceInfraStack extends cdk.Stack {
       privateDnsEnabled: true,
     });
 
+    // Add endpoint for DynamoDB
+    vpc.addGatewayEndpoint("DynamoDBEndpoint", {
+      service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+    });
+
+    // Add endpoint for CloudWatch Logs
+    new ec2.InterfaceVpcEndpoint(this, "CloudWatchLogsEndpoint", {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService(
+        "com.amazonaws." + this.region + ".logs"
+      ),
+      privateDnsEnabled: true,
+    });
+
     // Create Cloud Map namespace for service discovery
     const namespace = new servicediscovery.PrivateDnsNamespace(
       this,
-      "LlmServiceNamespace",
+      "AiServicesNamespace",
       {
-        name: "llm-service",
+        name: "ai-services.local",
         vpc,
-        description: "Namespace for LLM Service",
+        description: "Namespace for AI Language Model Services",
       }
     );
 
     // Create a service discovery service
-    const service = namespace.createService("LlmService", {
+    const service = namespace.createService("DeepseekLlmService", {
+      name: "deepseek-llm",
       dnsRecordType: servicediscovery.DnsRecordType.A,
       dnsTtl: cdk.Duration.seconds(10),
+      description: "DeepSeek LLM service for inference",
     });
 
     // Security group for LLM service instances
@@ -78,6 +94,35 @@ export class LlmServiceInfraStack extends cdk.Stack {
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(50051),
       "Allow gRPC traffic"
+    );
+
+    // Security group for Lambda functions to connect to LLM service
+    const lambdaClientSg = new ec2.SecurityGroup(this, "LambdaClientSg", {
+      vpc,
+      description:
+        "Security group for Lambda functions connecting to LLM Service",
+      allowAllOutbound: false,
+    });
+
+    // Allow Lambda to connect to LLM service
+    lambdaClientSg.addEgressRule(
+      llmServiceSg,
+      ec2.Port.tcp(50051),
+      "Allow Lambda to connect to LLM service"
+    );
+
+    // Allow Lambda outbound HTTPS access for AWS services via VPC endpoints
+    lambdaClientSg.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      "Allow HTTPS outbound traffic for AWS services"
+    );
+
+    // LLM service should accept connections from Lambda
+    llmServiceSg.addIngressRule(
+      lambdaClientSg,
+      ec2.Port.tcp(50051),
+      "Allow Lambda clients to connect"
     );
 
     // Create IAM role for EC2 instances
@@ -183,6 +228,43 @@ export class LlmServiceInfraStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ServiceId", {
       value: service.serviceId,
       description: "The ID of the Cloud Map service",
+    });
+
+    new cdk.CfnOutput(this, "VpcId", {
+      value: vpc.vpcId,
+      description: "The ID of the VPC",
+      exportName: "LlmServiceVpcId",
+    });
+
+    // Output the private subnet IDs for use by Lambda function in websocket repo
+    for (let i = 0; i < vpc.privateSubnets.length; i++) {
+      new cdk.CfnOutput(this, `PrivateSubnet${i + 1}Id`, {
+        value: vpc.privateSubnets[i].subnetId,
+        description: `The ID of private subnet ${i + 1}`,
+        exportName: `LlmServicePrivateSubnet${i + 1}Id`,
+      });
+    }
+
+    // Output the security group ID for Lambda to use
+    new cdk.CfnOutput(this, "LambdaClientSecurityGroupId", {
+      value: lambdaClientSg.securityGroupId,
+      description:
+        "Security Group ID for Lambda functions to connect to LLM service",
+      exportName: "LlmServiceLambdaClientSgId",
+    });
+
+    // Output service discovery namespace name
+    new cdk.CfnOutput(this, "ServiceDiscoveryNamespaceName", {
+      value: namespace.namespaceName,
+      description: "The name of the Cloud Map namespace",
+      exportName: "AiServicesNamespaceName",
+    });
+
+    // Output service discovery service name
+    new cdk.CfnOutput(this, "ServiceDiscoveryServiceName", {
+      value: service.serviceName,
+      description: "The name of the Cloud Map service",
+      exportName: "DeepseekLlmServiceName",
     });
   }
 }
