@@ -193,7 +193,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
         role: instanceRole,
         spotOptions: {
           requestType: ec2.SpotRequestType.ONE_TIME,
-          maxPrice: 0.3,
+          maxPrice: 0.4,
         },
       }
     );
