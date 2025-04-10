@@ -220,12 +220,6 @@ poetry run pytest tests/test_service.py
 
 ## Using Docker
 
-### Build
-
-```bash
-docker build -t llm-service:latest .
-```
-
 ### Docker
 
 ```bash
@@ -233,7 +227,7 @@ docker build -t llm-service:latest .
 docker build -t llm-service:latest .
 
 # Run with the specified model
-docker run -p 50051:50051 -e MODEL_NAME="deepseek-r1:1.5b" -e OLLAMA_URL="http://host.docker.internal:11434" llm-service:latest
+docker run -p 50051:50051 -e MODEL_NAME="deepseek-r1:latest" -e OLLAMA_URL="http://host.docker.internal:11434" llm-service:latest
 ```
 
 ## Development Commands
