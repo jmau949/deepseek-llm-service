@@ -63,33 +63,6 @@ export class LlmServiceInfraStack extends cdk.Stack {
     //   privateDnsEnabled: true,
     // });
 
-    // Add endpoint for API Gateway Management API
-    new ec2.InterfaceVpcEndpoint(this, "ApiGatewayManagementEndpoint", {
-      vpc,
-      service: new ec2.InterfaceVpcEndpointService(
-        `com.amazonaws.${this.region}.execute-api`
-      ),
-      privateDnsEnabled: true,
-    });
-    // Create Cloud Map namespace for service discovery
-    const namespace = new servicediscovery.PrivateDnsNamespace(
-      this,
-      "AiServicesNamespace",
-      {
-        name: "ai-services.local",
-        vpc,
-        description: "Namespace for AI Language Model Services",
-      }
-    );
-
-    // Create a service discovery service
-    const service = namespace.createService("DeepseekLlmService", {
-      name: "deepseek-llm",
-      dnsRecordType: servicediscovery.DnsRecordType.A,
-      dnsTtl: cdk.Duration.seconds(10),
-      description: "DeepSeek LLM service for inference",
-    });
-
     // Security group for LLM service instances
     const llmServiceSg = new ec2.SecurityGroup(this, "LlmServiceSg", {
       vpc,
@@ -126,12 +99,49 @@ export class LlmServiceInfraStack extends cdk.Stack {
       "Allow HTTPS outbound traffic for AWS services"
     );
 
+    // Allow Lambda security group outbound access to the API Gateway endpoint
+    lambdaClientSg.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      ec2.Port.tcp(443),
+      "Allow outbound HTTPS to API Gateway endpoint"
+    );
+
     // LLM service should accept connections from Lambda
     llmServiceSg.addIngressRule(
       lambdaClientSg,
       ec2.Port.tcp(50051),
       "Allow Lambda clients to connect"
     );
+
+    // Add endpoint for API Gateway Management API
+    new ec2.InterfaceVpcEndpoint(this, "ApiGatewayManagementEndpoint", {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService(
+        `com.amazonaws.${this.region}.execute-api`
+      ),
+      privateDnsEnabled: true,
+      subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+      securityGroups: [lambdaClientSg],
+    });
+
+    // Create Cloud Map namespace for service discovery
+    const namespace = new servicediscovery.PrivateDnsNamespace(
+      this,
+      "AiServicesNamespace",
+      {
+        name: "ai-services.local",
+        vpc,
+        description: "Namespace for AI Language Model Services",
+      }
+    );
+
+    // Create a service discovery service
+    const service = namespace.createService("DeepseekLlmService", {
+      name: "deepseek-llm",
+      dnsRecordType: servicediscovery.DnsRecordType.A,
+      dnsTtl: cdk.Duration.seconds(10),
+      description: "DeepSeek LLM service for inference",
+    });
 
     // Create IAM role for EC2 instances
     const instanceRole = new iam.Role(this, "LlmServiceInstanceRole", {
