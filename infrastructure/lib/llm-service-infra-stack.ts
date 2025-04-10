@@ -184,10 +184,11 @@ export class LlmServiceInfraStack extends cdk.Stack {
       "LlmServiceLaunchTemplate",
       {
         machineImage: ec2.MachineImage.latestAmazonLinux2(),
-        instanceType: ec2.InstanceType.of(
-          ec2.InstanceClass.G4DN,
-          ec2.InstanceSize.XLARGE
-        ),
+        instanceType: new ec2.InstanceType("g4dn.xlarge"),
+        // instanceType: ec2.InstanceType.of(
+        //   ec2.InstanceClass.G4DN,
+        //   ec2.InstanceSize.XLARGE
+        // ),
         userData,
         securityGroup: llmServiceSg,
         role: instanceRole,
