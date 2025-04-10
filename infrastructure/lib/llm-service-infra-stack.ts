@@ -194,7 +194,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
         role: instanceRole,
         spotOptions: {
           requestType: ec2.SpotRequestType.ONE_TIME,
-          maxPrice: 0.4,
+          maxPrice: 0.25,
         },
       }
     );
@@ -203,8 +203,8 @@ export class LlmServiceInfraStack extends cdk.Stack {
     const asg = new autoscaling.AutoScalingGroup(this, "LlmServiceAsg", {
       vpc,
       launchTemplate,
-      minCapacity: 1,
-      maxCapacity: 2,
+      minCapacity: 0,
+      maxCapacity: 0,
       // Remove desiredCapacity to avoid the warning and constant resetting
       // desiredCapacity: 1,
       instanceMonitoring: autoscaling.Monitoring.BASIC, // Use basic monitoring to save costs
@@ -218,6 +218,22 @@ export class LlmServiceInfraStack extends cdk.Stack {
     asg.scaleOnCpuUtilization("CpuScaling", {
       targetUtilizationPercent: 70,
       cooldown: cdk.Duration.seconds(300),
+    });
+
+    // Add scheduled action to stop instances at 12am Central Time (6am UTC)
+    asg.scaleOnSchedule("StopAtMidnight", {
+      schedule: autoscaling.Schedule.cron({ hour: "6", minute: "0" }),
+      minCapacity: 0,
+      maxCapacity: 0,
+      desiredCapacity: 0,
+    });
+
+    // Add scheduled action to start instances at 9am Central Time (3pm UTC)
+    asg.scaleOnSchedule("StartAtNineAM", {
+      schedule: autoscaling.Schedule.cron({ hour: "15", minute: "0" }),
+      minCapacity: 0,
+      maxCapacity: 0,
+      desiredCapacity: 0,
     });
 
     // Outputs
