@@ -54,15 +54,23 @@ export class LlmServiceInfraStack extends cdk.Stack {
       service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
     });
 
-    // Add endpoint for CloudWatch Logs
-    new ec2.InterfaceVpcEndpoint(this, "CloudWatchLogsEndpoint", {
+    // // Add endpoint for CloudWatch Logs
+    // new ec2.InterfaceVpcEndpoint(this, "CloudWatchLogsEndpoint", {
+    //   vpc,
+    //   service: new ec2.InterfaceVpcEndpointService(
+    //     "com.amazonaws." + this.region + ".logs"
+    //   ),
+    //   privateDnsEnabled: true,
+    // });
+
+    // Add endpoint for API Gateway Management API
+    new ec2.InterfaceVpcEndpoint(this, "ApiGatewayManagementEndpoint", {
       vpc,
       service: new ec2.InterfaceVpcEndpointService(
-        "com.amazonaws." + this.region + ".logs"
+        `com.amazonaws.${this.region}.execute-api`
       ),
       privateDnsEnabled: true,
     });
-
     // Create Cloud Map namespace for service discovery
     const namespace = new servicediscovery.PrivateDnsNamespace(
       this,
