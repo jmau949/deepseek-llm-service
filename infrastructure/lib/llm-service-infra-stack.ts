@@ -184,16 +184,16 @@ export class LlmServiceInfraStack extends cdk.Stack {
       "LlmServiceLaunchTemplate",
       {
         machineImage: ec2.MachineImage.latestAmazonLinux2(),
-        instanceType: ec2.InstanceType.of(
-          ec2.InstanceClass.T3,
-          ec2.InstanceSize.MICRO
-        ),
+        instanceType: new ec2.InstanceType("g4dn.large"),
+        //   ec2.InstanceClass.G4DN,
+        //   ec2.InstanceSize.LARGE
+        // ),
         userData,
         securityGroup: llmServiceSg,
         role: instanceRole,
         spotOptions: {
           requestType: ec2.SpotRequestType.ONE_TIME,
-          maxPrice: 0.006, // Very low spot price for t3.micro instances
+          maxPrice: 0.3, // Very low spot price for t3.micro instances
         },
       }
     );
