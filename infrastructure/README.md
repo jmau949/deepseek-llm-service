@@ -69,6 +69,7 @@ The ECR repository is a critical component of the infrastructure:
    ```bash
    npm run build
    npx cdk deploy LlmServiceCicdPipelineStack
+   npx cdk deploy LlmServiceInfraStack
    ```
 
 ### Automated CI/CD Flow

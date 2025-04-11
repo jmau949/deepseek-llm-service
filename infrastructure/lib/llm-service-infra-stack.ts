@@ -6,137 +6,77 @@ import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as ecr from "aws-cdk-lib/aws-ecr";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 export class LlmServiceInfraStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // Create a VPC
-    const vpc = new ec2.Vpc(this, "LlmServiceVpc", {
-      maxAzs: 1,
-      natGateways: 0,
-      ipAddresses: ec2.IpAddresses.cidr("172.16.0.0/16"), // Updated from deprecated 'cidr'
-      subnetConfiguration: [
-        {
-          name: "private",
-          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
-          cidrMask: 24,
-        },
-      ],
-      // Default security group will be restricted as a security best practice
-    });
-
-    // Only keep essential VPC endpoints
-    vpc.addInterfaceEndpoint("EcrDockerEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-    });
-
-    vpc.addInterfaceEndpoint("EcrEndpoint", {
-      service: ec2.InterfaceVpcEndpointAwsService.ECR,
-    });
-
-    vpc.addGatewayEndpoint("S3Endpoint", {
-      service: ec2.GatewayVpcEndpointAwsService.S3,
-    });
-
-    // Add interface endpoint for AWS API calls (for servicediscovery)
-    new ec2.InterfaceVpcEndpoint(this, "ServiceDiscoveryEndpoint", {
-      vpc,
-      service: new ec2.InterfaceVpcEndpointService(
-        "com.amazonaws." + this.region + ".servicediscovery"
-      ),
-      privateDnsEnabled: true,
-    });
-
-    // Add endpoint for DynamoDB
-    vpc.addGatewayEndpoint("DynamoDBEndpoint", {
-      service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
-    });
-
-    // // Add endpoint for CloudWatch Logs
-    // new ec2.InterfaceVpcEndpoint(this, "CloudWatchLogsEndpoint", {
-    //   vpc,
-    //   service: new ec2.InterfaceVpcEndpointService(
-    //     "com.amazonaws." + this.region + ".logs"
-    //   ),
-    //   privateDnsEnabled: true,
-    // });
-
-    // Security group for LLM service instances
-    const llmServiceSg = new ec2.SecurityGroup(this, "LlmServiceSg", {
-      vpc,
-      description: "Security group for LLM Service instances",
-      allowAllOutbound: true,
-    });
-
-    // Allow incoming gRPC traffic (port 50051)
-    llmServiceSg.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(50051),
-      "Allow gRPC traffic"
-    );
-
-    // Security group for Lambda functions to connect to LLM service
-    const lambdaClientSg = new ec2.SecurityGroup(this, "LambdaClientSg", {
-      vpc,
-      description:
-        "Security group for Lambda functions connecting to LLM Service",
-      allowAllOutbound: false,
-    });
-
-    // Allow Lambda to connect to LLM service
-    lambdaClientSg.addEgressRule(
-      llmServiceSg,
-      ec2.Port.tcp(50051),
-      "Allow Lambda to connect to LLM service"
-    );
-
-    // Allow Lambda outbound HTTPS access for AWS services via VPC endpoints
-    lambdaClientSg.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
-      "Allow HTTPS outbound traffic for AWS services"
-    );
-
-    // Allow Lambda security group outbound access to the API Gateway endpoint
-    lambdaClientSg.addEgressRule(
-      ec2.Peer.ipv4(vpc.vpcCidrBlock),
-      ec2.Port.tcp(443),
-      "Allow outbound HTTPS to API Gateway endpoint"
-    );
-
-    // LLM service should accept connections from Lambda
-    llmServiceSg.addIngressRule(
-      lambdaClientSg,
-      ec2.Port.tcp(50051),
-      "Allow Lambda clients to connect"
-    );
-
-    // Add endpoint for API Gateway Management API
-    new ec2.InterfaceVpcEndpoint(this, "ApiGatewayManagementEndpoint", {
-      vpc,
-      service: new ec2.InterfaceVpcEndpointService(
-        `com.amazonaws.${this.region}.execute-api`
-      ),
-      privateDnsEnabled: true,
-      subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-      securityGroups: [lambdaClientSg],
-    });
-
-    // Create Cloud Map namespace for service discovery
-    const namespace = new servicediscovery.PrivateDnsNamespace(
+    // Retrieve shared infrastructure values from SSM Parameter Store
+    const vpcId = ssm.StringParameter.valueForStringParameter(
       this,
-      "AiServicesNamespace",
-      {
-        name: "ai-services.local",
-        vpc,
-        description: "Namespace for AI Language Model Services",
-      }
+      "/deepseek-llm-service/SharedAiServicesVpcId"
     );
 
-    // Create a service discovery service
-    const service = namespace.createService("DeepseekLlmService", {
+    const subnet1Id = ssm.StringParameter.valueForStringParameter(
+      this,
+      "/deepseek-llm-service/SharedAiServicesPrivateSubnet1Id"
+    );
+
+    const llmServiceSgId = ssm.StringParameter.valueForStringParameter(
+      this,
+      "/deepseek-llm-service/SharedAiServicesLlmServiceSgId"
+    );
+
+    const lambdaClientSgId = ssm.StringParameter.valueForStringParameter(
+      this,
+      "/deepseek-llm-service/SharedAiServicesLambdaClientSgId"
+    );
+
+    const namespaceId = ssm.StringParameter.valueForStringParameter(
+      this,
+      "/deepseek-llm-service/SharedAiServicesNamespaceId"
+    );
+
+    const namespaceName = ssm.StringParameter.valueForStringParameter(
+      this,
+      "/deepseek-llm-service/SharedAiServicesNamespaceName"
+    );
+
+    // Import the VPC from the shared infrastructure stack using VpcAttributes
+    // This is more compatible with tokens from SSM than Vpc.fromLookup()
+    const vpc = ec2.Vpc.fromVpcAttributes(this, "SharedVpc", {
+      vpcId: vpcId,
+      availabilityZones: [cdk.Stack.of(this).availabilityZones[0]],
+      privateSubnetIds: [subnet1Id],
+    });
+
+    // Import security groups from the shared infrastructure
+    const llmServiceSg = ec2.SecurityGroup.fromSecurityGroupId(
+      this,
+      "LlmServiceSg",
+      llmServiceSgId
+    );
+
+    const lambdaClientSg = ec2.SecurityGroup.fromSecurityGroupId(
+      this,
+      "LambdaClientSg",
+      lambdaClientSgId
+    );
+
+    // Create service discovery service directly in the imported namespace
+    const service = new servicediscovery.Service(this, "DeepseekLlmService", {
+      namespace:
+        servicediscovery.PrivateDnsNamespace.fromPrivateDnsNamespaceAttributes(
+          this,
+          "AiServicesNamespace",
+          {
+            namespaceName,
+            namespaceId,
+            namespaceArn: `arn:aws:servicediscovery:${this.region}:${this.account}:namespace/${namespaceId}`,
+          }
+        ),
       name: "deepseek-llm",
       dnsRecordType: servicediscovery.DnsRecordType.A,
       dnsTtl: cdk.Duration.seconds(10),
@@ -203,10 +143,6 @@ export class LlmServiceInfraStack extends cdk.Stack {
       {
         machineImage: ec2.MachineImage.latestAmazonLinux2(),
         instanceType: new ec2.InstanceType("g4dn.xlarge"),
-        // instanceType: ec2.InstanceType.of(
-        //   ec2.InstanceClass.G4DN,
-        //   ec2.InstanceSize.XLARGE
-        // ),
         userData,
         securityGroup: llmServiceSg,
         role: instanceRole,
@@ -220,15 +156,13 @@ export class LlmServiceInfraStack extends cdk.Stack {
     // Create Auto Scaling Group with spot instances
     const asg = new autoscaling.AutoScalingGroup(this, "LlmServiceAsg", {
       vpc,
+      vpcSubnets: {
+        subnets: vpc.privateSubnets,
+      },
       launchTemplate,
       minCapacity: 0,
       maxCapacity: 0,
-      // Remove desiredCapacity to avoid the warning and constant resetting
-      // desiredCapacity: 1,
       instanceMonitoring: autoscaling.Monitoring.BASIC, // Use basic monitoring to save costs
-
-      // Simpler approach - don't specify any custom health check
-      // to avoid the deprecated APIs and the linter errors
       updatePolicy: autoscaling.UpdatePolicy.rollingUpdate(),
     });
 
@@ -256,7 +190,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
 
     // Outputs
     new cdk.CfnOutput(this, "NamespaceId", {
-      value: namespace.namespaceId,
+      value: namespaceId,
       description: "The ID of the Cloud Map namespace",
     });
 
@@ -265,41 +199,19 @@ export class LlmServiceInfraStack extends cdk.Stack {
       description: "The ID of the Cloud Map service",
     });
 
-    new cdk.CfnOutput(this, "VpcId", {
-      value: vpc.vpcId,
-      description: "The ID of the VPC",
-      exportName: "LlmServiceVpcId",
+    // Output service discovery service name for WebSocket Lambda
+    new cdk.CfnOutput(this, "ServiceDiscoveryServiceName", {
+      value: service.serviceName,
+      description: "The name of the Cloud Map service",
+      exportName: "DeepseekLlmServiceName",
     });
 
-    // Output the private subnet IDs for use by Lambda function in websocket repo
-    for (let i = 0; i < vpc.privateSubnets.length; i++) {
-      new cdk.CfnOutput(this, `PrivateSubnet${i + 1}Id`, {
-        value: vpc.privateSubnets[i].subnetId,
-        description: `The ID of private subnet ${i + 1}`,
-        exportName: `LlmServicePrivateSubnet${i + 1}Id`,
-      });
-    }
-
-    // Output the security group ID for Lambda to use
+    // Output Lambda security group ID for WebSocket Lambda
     new cdk.CfnOutput(this, "LambdaClientSecurityGroupId", {
       value: lambdaClientSg.securityGroupId,
       description:
         "Security Group ID for Lambda functions to connect to LLM service",
       exportName: "LlmServiceLambdaClientSgId",
-    });
-
-    // Output service discovery namespace name
-    new cdk.CfnOutput(this, "ServiceDiscoveryNamespaceName", {
-      value: namespace.namespaceName,
-      description: "The name of the Cloud Map namespace",
-      exportName: "AiServicesNamespaceName",
-    });
-
-    // Output service discovery service name
-    new cdk.CfnOutput(this, "ServiceDiscoveryServiceName", {
-      value: service.serviceName,
-      description: "The name of the Cloud Map service",
-      exportName: "DeepseekLlmServiceName",
     });
   }
 }
