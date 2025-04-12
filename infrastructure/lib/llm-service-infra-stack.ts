@@ -65,23 +65,38 @@ export class LlmServiceInfraStack extends cdk.Stack {
       lambdaClientSgId
     );
 
-    // Create service discovery service directly in the imported namespace
-    const service = new servicediscovery.Service(this, "DeepseekLlmService", {
-      namespace:
-        servicediscovery.PrivateDnsNamespace.fromPrivateDnsNamespaceAttributes(
-          this,
-          "AiServicesNamespace",
-          {
-            namespaceName,
-            namespaceId,
-            namespaceArn: `arn:aws:servicediscovery:${this.region}:${this.account}:namespace/${namespaceId}`,
-          }
-        ),
-      name: "deepseek-llm",
-      dnsRecordType: servicediscovery.DnsRecordType.A,
-      dnsTtl: cdk.Duration.seconds(10),
-      description: "DeepSeek LLM service for inference",
-    });
+    // Import the existing service created by the VPC stack
+    const serviceId = ssm.StringParameter.valueForStringParameter(
+      this,
+      "/deepseek-llm-service/SharedAiServicesLlmServiceId"
+    );
+
+    const serviceName = ssm.StringParameter.valueForStringParameter(
+      this,
+      "/deepseek-llm-service/SharedAiServicesLlmServiceName"
+    );
+
+    const service = servicediscovery.Service.fromServiceAttributes(
+      this,
+      "DeepseekLlmService",
+      {
+        serviceName,
+        serviceId,
+        serviceArn: `arn:aws:servicediscovery:${this.region}:${this.account}:service/${serviceId}`,
+        dnsRecordType: servicediscovery.DnsRecordType.A,
+        routingPolicy: servicediscovery.RoutingPolicy.WEIGHTED,
+        namespace:
+          servicediscovery.PrivateDnsNamespace.fromPrivateDnsNamespaceAttributes(
+            this,
+            "AiServicesNamespace",
+            {
+              namespaceName,
+              namespaceId,
+              namespaceArn: `arn:aws:servicediscovery:${this.region}:${this.account}:namespace/${namespaceId}`,
+            }
+          ),
+      }
+    );
 
     // Create IAM role for EC2 instances
     const instanceRole = new iam.Role(this, "LlmServiceInstanceRole", {
@@ -142,7 +157,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
       "LlmServiceLaunchTemplate",
       {
         machineImage: ec2.MachineImage.latestAmazonLinux2(),
-        instanceType: new ec2.InstanceType("g4dn.xlarge"),
+        instanceType: new ec2.InstanceType("c5.2xlarge"),
         userData,
         securityGroup: llmServiceSg,
         role: instanceRole,
