@@ -64,25 +64,53 @@ export class LlmServiceInfraStack extends cdk.Stack {
       // Get multiple subnet IDs for multi-AZ deployment
       const availableSubnetIds: string[] = [];
 
-      // Try to get subnet IDs, starting from 1 and increment until we can't find more
-      // Add a maximum loop count to prevent infinite loops
-      let subnetCounter = 1;
-      const MAX_SUBNETS_TO_CHECK = 10; // Reasonable upper limit
+      // First, try to determine the number of private subnets by reading the count parameter
+      try {
+        // Get the actual number of private subnets from the VPC stack
+        // This approach avoids trying to fetch non-existent parameters
+        const maxAzs =
+          Number(
+            ssm.StringParameter.valueForStringParameter(
+              this,
+              `${serviceDiscoveryPrefix}/SharedAiServicesMaxAzs`
+            )
+          ) || 2; // Default to 2 if parameter doesn't exist
 
-      while (subnetCounter <= MAX_SUBNETS_TO_CHECK) {
-        try {
-          const subnetId = ssm.StringParameter.valueForStringParameter(
-            this,
-            `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${subnetCounter}Id`
-          );
-          availableSubnetIds.push(subnetId);
-          subnetCounter++;
-        } catch (error) {
-          // No more subnet parameters found, exit the loop
-          console.log(
-            `No subnet found at index ${subnetCounter}, stopping search`
-          );
-          break;
+        console.log(`VPC was created with ${maxAzs} AZs`);
+
+        // Now we know exactly how many subnets to look for
+        for (let i = 1; i <= maxAzs; i++) {
+          try {
+            const subnetId = ssm.StringParameter.valueForStringParameter(
+              this,
+              `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${i}Id`
+            );
+            availableSubnetIds.push(subnetId);
+            console.log(`Found private subnet ${i}: ${subnetId}`);
+          } catch (error) {
+            console.log(`Warning: Could not find private subnet ${i}`);
+          }
+        }
+      } catch (error) {
+        console.log(
+          "Could not determine exact subnet count, falling back to manual detection"
+        );
+
+        // Fallback: Try to get each subnet ID individually
+        // This is the original approach, but limited to just the first 3 subnets to avoid
+        // excessive parameter fetching that might fail
+        for (let i = 1; i <= 3; i++) {
+          try {
+            const subnetId = ssm.StringParameter.valueForStringParameter(
+              this,
+              `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${i}Id`
+            );
+            availableSubnetIds.push(subnetId);
+          } catch (error) {
+            // No more subnet parameters found, exit the loop
+            console.log(`No subnet found at index ${i}, stopping search`);
+            break;
+          }
         }
       }
 
@@ -251,21 +279,108 @@ EOF`,
         `docker pull ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
 
         // Run the container with environment variables
-        `docker run -d --name llm-service --restart always \
-          -p ${llmServicePort}:${llmServicePort} \
-          -e MODEL_NAME="${modelName}" \
-          --log-driver=awslogs \
-          --log-opt awslogs-group=${logGroup.logGroupName} \
-          --log-opt awslogs-region=${this.region} \
-          --log-opt awslogs-stream={instance_id}/llm-service \
-          ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
+        `docker run -d --name llm-service --restart always \\
+        -p ${llmServicePort}:${llmServicePort} \\
+        -e MODEL_NAME="${modelName}" \\
+        --log-driver=awslogs \\
+        --log-opt awslogs-group=${logGroup.logGroupName} \\
+        --log-opt awslogs-region=${this.region} \\
+        --log-opt awslogs-stream={instance_id}/llm-service \\
+        ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
 
-        // Configure health check endpoint for ALB
-        `docker run -d --name health-check --restart always \
-          -p 80:80 \
-          --entrypoint "/bin/sh" \
-          amazon/amazon-ecs-sample \
-          -c "echo 'health check service for LLM' > /tmp/index.html && cd /tmp && python -m http.server 80"`
+        // Install bare minimum health check requirements - just grpcurl
+        `curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl`,
+
+        // Create an HTTP-to-gRPC health check bridge that's compatible with the container's built-in health check
+        `mkdir -p /opt/health-proxy`,
+        `cat > /opt/health-proxy/grpc_health_proxy.py << 'EOF'
+#!/usr/bin/env python3
+"""
+Ultra-minimal HTTP server that bridges ALB health checks to the container's gRPC health check.
+Uses the exact same health check mechanism as the container's HEALTHCHECK directive.
+"""
+import http.server
+import socketserver
+import subprocess
+import json
+import os
+
+# Configuration
+PORT = 80
+GRPC_PORT = ${llmServicePort}
+
+class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+    # Minimize logging to reduce overhead
+    def log_message(self, format, *args):
+        pass
+    
+    def do_GET(self):
+        if self.path == '/health':
+            self._check_grpc_health()
+        else:
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+    
+    def _check_grpc_health(self):
+        try:
+            # Use the exact same command as in the container's HEALTHCHECK
+            # This ensures consistency between the container health check and ALB health check
+            result = subprocess.run(
+                ["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"],
+                capture_output=True, timeout=1
+            )
+            
+            if result.returncode == 0 and b"llm.LLMService" in result.stdout:
+                # Service is healthy - exact same check as container's HEALTHCHECK
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "healthy"}).encode())
+            else:
+                # Service unhealthy
+                self.send_response(503)
+                self.send_header('Content-Type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'Service Unavailable')
+        except Exception as e:
+            # Any errors indicate unhealthy state
+            self.send_response(503)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(f"Service Unavailable: {str(e)}".encode())
+
+if __name__ == "__main__":
+    print(f"Starting HTTP-to-gRPC health check proxy on port {PORT}")
+    with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
+        httpd.serve_forever()
+EOF`,
+
+        // Create a systemd service for reliability but with minimal overhead
+        `cat > /etc/systemd/system/health-proxy.service << 'EOF'
+[Unit]
+Description=HTTP-to-gRPC Health Check Proxy
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/health-proxy/grpc_health_proxy.py
+Restart=always
+RestartSec=3
+CPUQuota=5%
+MemoryLimit=25M
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+EOF`,
+
+        // Enable and start the service
+        `chmod +x /opt/health-proxy/grpc_health_proxy.py`,
+        `systemctl daemon-reload`,
+        `systemctl enable health-proxy`,
+        `systemctl start health-proxy`
       );
 
       /**
