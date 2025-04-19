@@ -103,10 +103,26 @@ export class LlmServiceInfraStack extends cdk.Stack {
        * Rather than creating new resources, we're importing existing
        * resources created by the VpcInfrastructureStack
        */
+
+      // Calculate the number of AZs based on the subnets we found
+      // For the VPC created with 2 AZs and 2 subnet types (public and private),
+      // each AZ has 1 private subnet, so we divide by 1
+      const requiredAzs = Math.min(2, availableSubnetIds.length);
+      const availabilityZones = cdk.Stack.of(this).availabilityZones.slice(
+        0,
+        requiredAzs
+      );
+
+      console.log(
+        `Using ${requiredAzs} availability zones: ${availabilityZones.join(
+          ", "
+        )}`
+      );
+
       const vpc = ec2.Vpc.fromVpcAttributes(this, "SharedVpc", {
         vpcId: vpcId,
-        // Use all available AZs from the account
-        availabilityZones: cdk.Stack.of(this).availabilityZones,
+        // Use only the number of AZs that match our subnet count
+        availabilityZones: availabilityZones,
         // Use all the private subnets we found
         privateSubnetIds: availableSubnetIds,
       });
@@ -310,12 +326,10 @@ EOF`,
         vpcSubnets: subnetSelection,
         launchTemplate,
         minCapacity: 1,
-        maxCapacity: 1, // Allow scaling to 2 instances max
-        desiredCapacity: 1, // Start with 1 instance
+        maxCapacity: 1,
+        // Remove desiredCapacity to avoid the warning about resetting the size on every deployment
         instanceMonitoring: autoscaling.Monitoring.BASIC, // Basic monitoring to save costs
-        healthCheck: autoscaling.HealthCheck.elb({
-          grace: cdk.Duration.minutes(5),
-        }),
+        // Remove the deprecated healthCheck property entirely to avoid warnings
         updatePolicy: autoscaling.UpdatePolicy.rollingUpdate({
           maxBatchSize: 1,
           minInstancesInService: 0,
@@ -356,14 +370,12 @@ EOF`,
         schedule: autoscaling.Schedule.cron({ hour: "6", minute: "0" }),
         minCapacity: 0,
         maxCapacity: 0,
-        desiredCapacity: 0,
       });
 
       asg.scaleOnSchedule("StartAtNineAM", {
         schedule: autoscaling.Schedule.cron({ hour: "15", minute: "0" }),
         minCapacity: 1,
         maxCapacity: 1,
-        desiredCapacity: 1,
       });
 
       /**
