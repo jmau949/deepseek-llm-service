@@ -116,10 +116,12 @@ export class LlmServiceInfraStack extends cdk.Stack {
 
       // Import the target group from the shared infrastructure
       const targetGroup =
-        elasticloadbalancingv2.ApplicationTargetGroup.fromTargetGroupArn(
+        elasticloadbalancingv2.ApplicationTargetGroup.fromTargetGroupAttributes(
           this,
           "LlmServiceTargetGroup",
-          targetGroupArn
+          {
+            targetGroupArn: targetGroupArn,
+          }
         );
 
       /**
