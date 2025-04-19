@@ -280,13 +280,19 @@ EOF`,
 
         // Run the container with environment variables
         `docker run -d --name llm-service --restart always \\
-        -p ${llmServicePort}:${llmServicePort} \\
-        -e MODEL_NAME="${modelName}" \\
-        --log-driver=awslogs \\
-        --log-opt awslogs-group=${logGroup.logGroupName} \\
-        --log-opt awslogs-region=${this.region} \\
-        --log-opt awslogs-stream={instance_id}/llm-service \\
-        ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
+					-p ${llmServicePort}:${llmServicePort} \\
+					-e MODEL_NAME="${modelName}" \\
+					-e GRPC_ENABLE_HTTP2=1 \\
+					-e GRPC_KEEPALIVE_TIME_MS=10000 \\
+					-e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \\
+					-e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \\
+					-e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 \\
+					-e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \\
+					--log-driver=awslogs \\
+					--log-opt awslogs-group=${logGroup.logGroupName} \\
+					--log-opt awslogs-region=${this.region} \\
+					--log-opt awslogs-stream={instance_id}/llm-service \\
+					${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
 
         // Install bare minimum health check requirements - just grpcurl
         `curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl`,
