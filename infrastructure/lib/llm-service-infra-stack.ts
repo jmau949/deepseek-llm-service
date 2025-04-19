@@ -65,10 +65,11 @@ export class LlmServiceInfraStack extends cdk.Stack {
       const availableSubnetIds: string[] = [];
 
       // Try to get subnet IDs, starting from 1 and increment until we can't find more
+      // Add a maximum loop count to prevent infinite loops
       let subnetCounter = 1;
-      let continueLooping = true;
+      const MAX_SUBNETS_TO_CHECK = 10; // Reasonable upper limit
 
-      while (continueLooping) {
+      while (subnetCounter <= MAX_SUBNETS_TO_CHECK) {
         try {
           const subnetId = ssm.StringParameter.valueForStringParameter(
             this,
@@ -78,7 +79,10 @@ export class LlmServiceInfraStack extends cdk.Stack {
           subnetCounter++;
         } catch (error) {
           // No more subnet parameters found, exit the loop
-          continueLooping = false;
+          console.log(
+            `No subnet found at index ${subnetCounter}, stopping search`
+          );
+          break;
         }
       }
 
