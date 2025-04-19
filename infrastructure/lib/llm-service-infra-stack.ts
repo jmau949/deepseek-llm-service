@@ -46,11 +46,6 @@ export class LlmServiceInfraStack extends cdk.Stack {
         `${serviceDiscoveryPrefix}/SharedAiServicesVpcId`
       );
 
-      const subnet1Id = ssm.StringParameter.valueForStringParameter(
-        this,
-        `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet1Id`
-      );
-
       const llmServiceSgId = ssm.StringParameter.valueForStringParameter(
         this,
         `${serviceDiscoveryPrefix}/SharedAiServicesLlmServiceSgId`
@@ -66,6 +61,38 @@ export class LlmServiceInfraStack extends cdk.Stack {
         `${serviceDiscoveryPrefix}/SharedAiServicesVpcCidrBlock`
       );
 
+      // Get multiple subnet IDs for multi-AZ deployment
+      const availableSubnetIds: string[] = [];
+
+      // Try to get subnet IDs, starting from 1 and increment until we can't find more
+      let subnetCounter = 1;
+      let continueLooping = true;
+
+      while (continueLooping) {
+        try {
+          const subnetId = ssm.StringParameter.valueForStringParameter(
+            this,
+            `${serviceDiscoveryPrefix}/SharedAiServicesPrivateSubnet${subnetCounter}Id`
+          );
+          availableSubnetIds.push(subnetId);
+          subnetCounter++;
+        } catch (error) {
+          // No more subnet parameters found, exit the loop
+          continueLooping = false;
+        }
+      }
+
+      // Ensure we have at least one subnet
+      if (availableSubnetIds.length === 0) {
+        throw new Error("No private subnets found in SSM Parameter Store");
+      }
+
+      console.log(
+        `Found ${
+          availableSubnetIds.length
+        } private subnet(s): ${availableSubnetIds.join(", ")}`
+      );
+
       /**
        * Import VPC and Related Resources
        *
@@ -74,8 +101,10 @@ export class LlmServiceInfraStack extends cdk.Stack {
        */
       const vpc = ec2.Vpc.fromVpcAttributes(this, "SharedVpc", {
         vpcId: vpcId,
-        availabilityZones: [cdk.Stack.of(this).availabilityZones[0]],
-        privateSubnetIds: [subnet1Id], // Using private subnets with NAT gateway
+        // Use all available AZs from the account
+        availabilityZones: cdk.Stack.of(this).availabilityZones,
+        // Use all the private subnets we found
+        privateSubnetIds: availableSubnetIds,
       });
 
       // Import security group from the shared infrastructure
@@ -200,14 +229,21 @@ EOF`,
         `docker pull ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
 
         // Run the container with environment variables
-        // Note: No need to register with Cloud Map anymore
         `docker run -d --name llm-service --restart always \
           -p ${llmServicePort}:${llmServicePort} \
           -e MODEL_NAME="${modelName}" \
           --log-driver=awslogs \
           --log-opt awslogs-group=${logGroup.logGroupName} \
+          --log-opt awslogs-region=${this.region} \
           --log-opt awslogs-stream={instance_id}/llm-service \
-          ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`
+          ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
+
+        // Configure health check endpoint for ALB
+        `docker run -d --name health-check --restart always \
+          -p 80:80 \
+          --entrypoint "/bin/sh" \
+          amazon/amazon-ecs-sample \
+          -c "echo 'health check service for LLM' > /tmp/index.html && cd /tmp && python -m http.server 80"`
       );
 
       /**
@@ -250,22 +286,25 @@ EOF`,
        * Auto Scaling Group
        *
        * Create an ASG that will:
-       * 1. Launch instances in the private subnet
+       * 1. Launch instances across multiple AZs for high availability
        * 2. Register instances with the ALB target group automatically
        * 3. Scale based on demand
        * 4. Follow a schedule for cost optimization
        */
-      const subnetId = subnet1Id;
-      const subnet = ec2.Subnet.fromSubnetId(this, "PrivateSubnet1", subnetId);
+
+      // Create a map of subnets for the ASG to use
+      const subnetSelection: ec2.SubnetSelection = {
+        subnets: availableSubnetIds.map((id, index) =>
+          ec2.Subnet.fromSubnetId(this, `PrivateSubnet${index + 1}`, id)
+        ),
+      };
 
       const asg = new autoscaling.AutoScalingGroup(this, "LlmServiceAsg", {
         vpc,
-        vpcSubnets: {
-          subnets: [subnet],
-        },
+        vpcSubnets: subnetSelection,
         launchTemplate,
-        minCapacity: 0,
-        maxCapacity: 2, // Allow scaling to 2 instances max
+        minCapacity: 1,
+        maxCapacity: 1, // Allow scaling to 2 instances max
         desiredCapacity: 1, // Start with 1 instance
         instanceMonitoring: autoscaling.Monitoring.BASIC, // Basic monitoring to save costs
         healthCheck: autoscaling.HealthCheck.elb({
@@ -317,7 +356,7 @@ EOF`,
       asg.scaleOnSchedule("StartAtNineAM", {
         schedule: autoscaling.Schedule.cron({ hour: "15", minute: "0" }),
         minCapacity: 1,
-        maxCapacity: 2,
+        maxCapacity: 1,
         desiredCapacity: 1,
       });
 
