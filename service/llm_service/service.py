@@ -7,6 +7,7 @@ Implementation of the LLM gRPC service.
 import time
 import logging
 import grpc
+import os
 from concurrent import futures
 from typing import Dict, Any
 
@@ -67,6 +68,16 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
         logger.info(f"Received streaming request with prompt: {request.prompt[:50]}...")
         
         try:
+            # Extract or create session ID for sticky sessions
+            session_id = self._get_or_create_session_id(context)
+            logger.debug(f"Using session ID: {session_id}")
+            
+            # Set session cookie in metadata for sticky sessions
+            if self.config.sticky_session_enabled and session_id:
+                context.set_trailing_metadata([
+                    ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
+                ])
+            
             # Map gRPC request parameters to Ollama parameters
             ollama_params = self._map_parameters(request.parameters)
             
@@ -97,6 +108,16 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
         logger.info(f"Received non-streaming request with prompt: {request.prompt[:50]}...")
         
         try:
+            # Extract or create session ID for sticky sessions
+            session_id = self._get_or_create_session_id(context)
+            logger.debug(f"Using session ID: {session_id}")
+            
+            # Set session cookie in metadata for sticky sessions
+            if self.config.sticky_session_enabled and session_id:
+                context.set_trailing_metadata([
+                    ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
+                ])
+            
             # Map gRPC request parameters to Ollama parameters
             ollama_params = self._map_parameters(request.parameters)
             
@@ -108,6 +129,42 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
         except Exception as e:
             logger.error(f"Error generating complete response: {e}")
             context.abort(grpc.StatusCode.INTERNAL, f"Error generating response: {e}")
+
+    def _get_or_create_session_id(self, context):
+        """
+        Gets or creates a session ID for sticky routing.
+        
+        Args:
+            context: The gRPC context with metadata
+            
+        Returns:
+            The session ID from metadata or a new one
+        """
+        if not self.config.sticky_session_enabled:
+            return None
+            
+        try:
+            # Try to extract session from metadata (cookie)
+            metadata = dict(context.invocation_metadata())
+            cookie = metadata.get('cookie', '')
+            
+            # Parse the cookie string to find our session cookie
+            if cookie and self.config.sticky_session_cookie in cookie:
+                # Extract the session ID from the cookie string
+                cookie_parts = cookie.split(';')
+                for part in cookie_parts:
+                    if self.config.sticky_session_cookie in part:
+                        key_value = part.strip().split('=')
+                        if len(key_value) == 2 and key_value[0] == self.config.sticky_session_cookie:
+                            return key_value[1]
+            
+            # If no session cookie found, create a new one
+            import uuid
+            return str(uuid.uuid4())
+                
+        except Exception as e:
+            logger.warning(f"Error processing session cookie: {e}")
+            return None
 
     def _map_parameters(self, params):
         """
@@ -142,13 +199,23 @@ def serve(config: Config):
     Args:
         config: Configuration object
     """
+    # Configure gRPC server with HTTP/2 options for ALB and sticky sessions
+    server_options = [
+        # Maximum message size (100MB)
+        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
+        ('grpc.max_send_message_length', 100 * 1024 * 1024),
+        # HTTP/2 settings for ALB
+        ('grpc.http2.min_time_between_pings_ms', 10000),
+        ('grpc.http2.max_pings_without_data', 0),
+        ('grpc.keepalive_time_ms', 30000),
+        ('grpc.keepalive_timeout_ms', 10000),
+        ('grpc.keepalive_permit_without_calls', 1),
+        ('grpc.http2.max_ping_strikes', 0),
+    ]
+    
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=config.worker_threads),
-        options=[
-            # Maximum message size (100MB)
-            ('grpc.max_receive_message_length', 100 * 1024 * 1024),
-            ('grpc.max_send_message_length', 100 * 1024 * 1024),
-        ]
+        options=server_options
     )
     
     # Add the LLM service to the server
@@ -159,7 +226,11 @@ def serve(config: Config):
     # Add secure or insecure port based on configuration
     if config.use_tls:
         # Implementation for TLS would go here
-        pass
+        credentials = grpc.ssl_server_credentials([(
+            open(config.tls_key_path, 'rb').read(),
+            open(config.tls_cert_path, 'rb').read()
+        )])
+        server.add_secure_port(f'[::]:{config.port}', credentials)
     else:
         server.add_insecure_port(f'[::]:{config.port}')
     

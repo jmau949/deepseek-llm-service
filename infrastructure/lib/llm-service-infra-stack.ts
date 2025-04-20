@@ -5,6 +5,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as elasticloadbalancingv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import { Construct } from "constructs";
 
 /**
@@ -59,6 +60,17 @@ export class LlmServiceInfraStack extends cdk.Stack {
       const vpcCidrBlock = ssm.StringParameter.valueForStringParameter(
         this,
         `${serviceDiscoveryPrefix}/SharedAiServicesVpcCidrBlock`
+      );
+
+      // Retrieve custom domain information
+      const certificateDomain = ssm.StringParameter.valueForStringParameter(
+        this,
+        `${serviceDiscoveryPrefix}/SharedAiServicesCertificateDomain`
+      );
+
+      const certificateArn = ssm.StringParameter.valueForStringParameter(
+        this,
+        `${serviceDiscoveryPrefix}/SharedAiServicesCertificateArn`
       );
 
       // Get multiple subnet IDs for multi-AZ deployment
@@ -172,6 +184,13 @@ export class LlmServiceInfraStack extends cdk.Stack {
           }
         );
 
+      // Import certificate for the custom domain
+      const certificate = acm.Certificate.fromCertificateArn(
+        this,
+        "DeepseekCertificate",
+        certificateArn
+      );
+
       /**
        * EC2 Instance Role
        *
@@ -232,19 +251,20 @@ export class LlmServiceInfraStack extends cdk.Stack {
        * EC2 User Data
        *
        * Define the startup script that will:
-       * 1. Install Docker
+       * 1. Install Docker and necessary dependencies
        * 2. Pull the LLM service container
        * 3. Run the container with the correct configuration
-       *
-       * No service discovery registration is needed anymore since
-       * instances will be registered to the ALB target group automatically
+       * 4. Set up an HTTPS health check proxy for the ALB
        */
       const userData = ec2.UserData.forLinux();
       userData.addCommands(
         "yum update -y",
-        "yum install -y docker amazon-cloudwatch-agent",
+        "yum install -y docker amazon-cloudwatch-agent python3 python3-pip",
         "systemctl start docker",
         "systemctl enable docker",
+
+        // Install necessary packages for HTTPS health checks
+        "pip3 install cryptography pyopenssl",
 
         // Configure CloudWatch agent
         `cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
@@ -278,42 +298,56 @@ EOF`,
         `aws ecr get-login-password --region ${this.region} | docker login --username AWS --password-stdin ${this.account}.dkr.ecr.${this.region}.amazonaws.com`,
         `docker pull ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
 
-        // Run the container with environment variables
+        // Run the container with environment variables for gRPC sticky sessions
         `docker run -d --name llm-service --restart always \\
-					-p ${llmServicePort}:${llmServicePort} \\
-					-e MODEL_NAME="${modelName}" \\
-					-e GRPC_ENABLE_HTTP2=1 \\
-					-e GRPC_KEEPALIVE_TIME_MS=10000 \\
-					-e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \\
-					-e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \\
-					-e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 \\
-					-e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \\
-					--log-driver=awslogs \\
-					--log-opt awslogs-group=${logGroup.logGroupName} \\
-					--log-opt awslogs-region=${this.region} \\
-					--log-opt awslogs-stream={instance_id}/llm-service \\
-					${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
+          -p ${llmServicePort}:${llmServicePort} \\
+          -e MODEL_NAME="${modelName}" \\
+          -e GRPC_ENABLE_HTTP2=1 \\
+          -e GRPC_KEEPALIVE_TIME_MS=10000 \\
+          -e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \\
+          -e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \\
+          -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 \\
+          -e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \\
+          -e STICKY_SESSION_COOKIE="LlmServiceStickiness" \\
+          --log-driver=awslogs \\
+          --log-opt awslogs-group=${logGroup.logGroupName} \\
+          --log-opt awslogs-region=${this.region} \\
+          --log-opt awslogs-stream={instance_id}/llm-service \\
+          ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
 
-        // Install bare minimum health check requirements - just grpcurl
+        // Install bare minimum health check requirements - grpcurl
         `curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl`,
 
-        // Create an HTTP-to-gRPC health check bridge that's compatible with the container's built-in health check
+        // Create a self-signed certificate for the HTTPS health check proxy
+        `mkdir -p /opt/health-proxy/certs`,
+        `openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \\
+          -subj "/CN=${certificateDomain}" \\
+          -keyout /opt/health-proxy/certs/server.key \\
+          -out /opt/health-proxy/certs/server.crt`,
+
+        // Create an HTTPS-to-gRPC health check bridge with support for sticky sessions
         `mkdir -p /opt/health-proxy`,
-        `cat > /opt/health-proxy/grpc_health_proxy.py << 'EOF'
+        `cat > /opt/health-proxy/https_grpc_health_proxy.py << 'EOF'
 #!/usr/bin/env python3
 """
-Ultra-minimal HTTP server that bridges ALB health checks to the container's gRPC health check.
-Uses the exact same health check mechanism as the container's HEALTHCHECK directive.
+HTTPS server that bridges ALB health checks to the container's gRPC health check.
+Also supports sticky sessions with cookies for the ALB.
 """
 import http.server
 import socketserver
 import subprocess
 import json
 import os
+import ssl
+import uuid
+from http.cookies import SimpleCookie
 
 # Configuration
-PORT = 80
+PORT = 443
 GRPC_PORT = ${llmServicePort}
+CERT_PATH = "/opt/health-proxy/certs/server.crt"
+KEY_PATH = "/opt/health-proxy/certs/server.key"
+COOKIE_NAME = "LlmServiceStickiness"
 
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     # Minimize logging to reduce overhead
@@ -326,22 +360,23 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
+            self._set_sticky_session_cookie()
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok"}).encode())
     
     def _check_grpc_health(self):
         try:
             # Use the exact same command as in the container's HEALTHCHECK
-            # This ensures consistency between the container health check and ALB health check
             result = subprocess.run(
                 ["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"],
                 capture_output=True, timeout=1
             )
             
             if result.returncode == 0 and b"llm.LLMService" in result.stdout:
-                # Service is healthy - exact same check as container's HEALTHCHECK
+                # Service is healthy
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
+                self._set_sticky_session_cookie()
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "healthy"}).encode())
             else:
@@ -356,22 +391,48 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/plain')
             self.end_headers()
             self.wfile.write(f"Service Unavailable: {str(e)}".encode())
+    
+    def _set_sticky_session_cookie(self):
+        """Set a sticky session cookie for ALB sticky routing"""
+        # Check if cookie already exists in request
+        cookie_exists = False
+        if 'Cookie' in self.headers:
+            cookies = SimpleCookie(self.headers['Cookie'])
+            if COOKIE_NAME in cookies:
+                cookie_exists = True
+                
+        # Only set if cookie doesn't exist
+        if not cookie_exists:
+            # Generate a random session ID
+            session_id = str(uuid.uuid4())
+            # Set cookie with appropriate attributes for ALB stickiness
+            self.send_header('Set-Cookie', 
+                f'{COOKIE_NAME}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
 
 if __name__ == "__main__":
-    print(f"Starting HTTP-to-gRPC health check proxy on port {PORT}")
-    with socketserver.TCPServer(("", PORT), HealthCheckHandler) as httpd:
+    print(f"Starting HTTPS-to-gRPC health check proxy on port {PORT}")
+    
+    # Set up HTTPS server with SSL context
+    httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(CERT_PATH, KEY_PATH)
+    httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
+    
+    try:
         httpd.serve_forever()
+    except Exception as e:
+        print(f"Server error: {e}")
 EOF`,
 
         // Create a systemd service for reliability but with minimal overhead
         `cat > /etc/systemd/system/health-proxy.service << 'EOF'
 [Unit]
-Description=HTTP-to-gRPC Health Check Proxy
+Description=HTTPS-to-gRPC Health Check Proxy
 After=network.target docker.service
 Requires=docker.service
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/health-proxy/grpc_health_proxy.py
+ExecStart=/usr/bin/python3 /opt/health-proxy/https_grpc_health_proxy.py
 Restart=always
 RestartSec=3
 CPUQuota=5%
@@ -383,7 +444,7 @@ WantedBy=multi-user.target
 EOF`,
 
         // Enable and start the service
-        `chmod +x /opt/health-proxy/grpc_health_proxy.py`,
+        `chmod +x /opt/health-proxy/https_grpc_health_proxy.py`,
         `systemctl daemon-reload`,
         `systemctl enable health-proxy`,
         `systemctl start health-proxy`
@@ -394,18 +455,17 @@ EOF`,
        *
        * Define how EC2 instances should be launched:
        * - Machine image (Amazon Linux 2)
-       * - Instance type (compute optimized for ML workloads)
+       * - Instance type (GPU optimized for ML workloads)
        * - User data script
        * - Security group
        * - IAM role
-       * - Spot instances for cost savings
        */
       const launchTemplate = new ec2.LaunchTemplate(
         this,
         "LlmServiceLaunchTemplate",
         {
           machineImage: ec2.MachineImage.latestAmazonLinux2(),
-          instanceType: new ec2.InstanceType("c5.2xlarge"), // Adjust for your GPU/workload requirements
+          instanceType: new ec2.InstanceType("c5.2xlarge"), // GPU instance for model inference
           userData,
           securityGroup: llmServiceSg,
           role: instanceRole,
@@ -447,13 +507,11 @@ EOF`,
         vpcSubnets: subnetSelection,
         launchTemplate,
         minCapacity: 1,
-        maxCapacity: 1,
-        // Remove desiredCapacity to avoid the warning about resetting the size on every deployment
+        maxCapacity: 1, // Increased to allow for scale out during high demand
         instanceMonitoring: autoscaling.Monitoring.BASIC, // Basic monitoring to save costs
-        // Remove the deprecated healthCheck property entirely to avoid warnings
         updatePolicy: autoscaling.UpdatePolicy.rollingUpdate({
           maxBatchSize: 1,
-          minInstancesInService: 0,
+          minInstancesInService: 0, // Keep at least one instance running during updates
           pauseTime: cdk.Duration.minutes(5),
         }),
       });
@@ -484,16 +542,16 @@ EOF`,
        * Scheduled Scaling
        *
        * Implement cost-saving measures by scaling down during off-hours:
-       * - Stop instances at 12am Central Time (6am UTC)
-       * - Start instances at 9am Central Time (3pm UTC)
+       * - Scale down to minimum at 12am Central Time (6am UTC)
+       * - Scale up to normal capacity at 9am Central Time (3pm UTC)
        */
-      asg.scaleOnSchedule("StopAtMidnight", {
+      asg.scaleOnSchedule("ScaleDownAtMidnight", {
         schedule: autoscaling.Schedule.cron({ hour: "6", minute: "0" }),
         minCapacity: 0,
         maxCapacity: 0,
       });
 
-      asg.scaleOnSchedule("StartAtNineAM", {
+      asg.scaleOnSchedule("ScaleUpAtNineAM", {
         schedule: autoscaling.Schedule.cron({ hour: "15", minute: "0" }),
         minCapacity: 1,
         maxCapacity: 1,
@@ -525,6 +583,12 @@ EOF`,
         value: logGroup.logGroupName,
         description: "The name of the CloudWatch Log Group",
         exportName: "DeepseekLlmServiceLogGroupName",
+      });
+
+      new cdk.CfnOutput(this, "CertificateDomain", {
+        value: certificateDomain,
+        description: "The domain name used for the LLM service",
+        exportName: "DeepseekLlmServiceDomain",
       });
     } catch (error) {
       console.error("Error retrieving SSM parameters:", error);

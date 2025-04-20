@@ -1,169 +1,206 @@
 # DeepSeek LLM Service Infrastructure
 
-This project contains the AWS CDK (Cloud Development Kit) infrastructure for deploying and managing the DeepSeek LLM Service. The infrastructure is designed to be fully automated through a CI/CD pipeline and leverages several AWS services including ECR, EC2 Auto Scaling Groups, CodePipeline, and Cloud Map for service discovery.
+This project contains the AWS CDK (Cloud Development Kit) infrastructure for deploying and managing the DeepSeek LLM Service. The infrastructure is designed to support an AI chatbot architecture with a React frontend, API Gateway WebSockets, and GPU-powered LLM inference services running in a secure VPC.
 
 ## Architecture Overview
 
 The infrastructure consists of two main stacks:
 
-1. **CI/CD Pipeline Stack (`LlmServiceCicdPipelineStack`)**: Manages the continuous integration and deployment process.
-2. **LLM Service Infrastructure Stack (`LlmServiceInfraStack`)**: Provisions the actual runtime infrastructure for the service.
+1. **VPC Infrastructure Stack (`VpcInfrastructureStack`)**: Creates the foundational network architecture including VPC, subnets, NAT Gateway, security groups, and Application Load Balancer.
+2. **LLM Service Infrastructure Stack (`LlmServiceInfraStack`)**: Provisions the GPU instances running the LLM service within the VPC created by the VPC Infrastructure Stack.
 
 ### Key Components
 
-- **Amazon ECR Repository**: Stores Docker images for the LLM service
-- **CodePipeline**: Orchestrates the CI/CD workflow
-- **CodeBuild**: Builds and pushes Docker images
-- **EC2 Auto Scaling Group**: Runs the LLM service containers
-- **Cloud Map**: Provides service discovery for the distributed components
-- **VPC and Security Groups**: Network infrastructure
+#### External Components (Outside VPC)
+- **React Client Frontend**: The user-facing web application
+- **API Gateway WebSockets**: Manages real-time communication with clients
+- **Lambda Functions**: $authorizer and $connect handlers for WebSocket authentication and connection management
+- **DynamoDB**: Stores WebSocket connection information
 
-## ECR (Elastic Container Registry) Details
+#### Internal Components (Inside VPC)
+- **Private Application Load Balancer (ALB)**: Provides internal load balancing with HTTPS and sticky sessions for gRPC
+- **Auto Scaling Group of GPU Instances**: Runs the LLM service containers
+- **Lambda Message Handler**: Processes WebSocket messages and communicates with the LLM service
+- **NAT Gateway**: Allows instances to access external services (DynamoDB, ECR, etc.)
+- **VPC and Security Groups**: Network infrastructure and access controls
 
-The ECR repository is a critical component of the infrastructure:
+## VPC Infrastructure Stack
 
-- **Repository Name**: `llm-service`
-- **Repository URI Format**: `${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/llm-service`
-- **Creation**: The ECR repository is referenced in the pipeline stack (not created) and should already exist before the pipeline stack deployment
+The VPC infrastructure stack creates the foundational network components:
 
-### How the ECR Process Works
+### VPC Configuration
+- **CIDR Block**: 172.16.0.0/16 (default)
+- **Availability Zones**: Minimum of 2 AZs for high availability
+- **Subnets**:
+  - **Public Subnets**: For NAT Gateway placement
+  - **Private Subnets**: For LLM service instances and Lambda functions
 
-1. **Image Building**:
-   - The CI/CD pipeline automatically builds a Docker image when changes are pushed to the GitHub repository
-   - The build process uses a CodeBuild project with Docker capabilities
-   - **Important**: The Dockerfile is located in the `service/` directory of the repository, but the CodeBuild project looks for it at the repository root
-   - The command executed is: `docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .` from the repository root
-   - **Note**: If builds are failing, ensure one of the following:
-     - Move the Dockerfile to the repository root, OR
-     - Modify the CodeBuild buildspec to change directory to service/ before building, OR
-     - Update the build command to specify the Dockerfile path: `docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG -f service/Dockerfile .`
-   - Each image is tagged with both the Git commit hash (short form) and `latest`
+### Security Groups
+1. **LLM Service Security Group**: Controls access to LLM service instances
+   - Allows inbound traffic from the ALB security group on port 50051 (gRPC)
+   - Allows inbound traffic from the ALB security group on port 443 (health checks)
 
-2. **Image Storage**:
-   - Images are pushed to the ECR repository with unique tags
-   - The repository maintains version history through these tags
-   - The `latest` tag always points to the most recently built image
+2. **ALB Security Group**: Controls access to the private ALB
+   - Allows inbound traffic from Lambda security group on port 443
+   - Allows outbound traffic to LLM service security group on ports 50051 and 443
 
-3. **Image Deployment**:
-   - EC2 instances in the Auto Scaling Group pull the image from ECR
-   - The instances authenticate with ECR using instance roles
-   - The Docker image is pulled using the command:
-     ```
-     aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-     docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/llm-service:latest
-     ```
-   - The container is run with the necessary environment variables, particularly the LLM model name
+3. **Lambda Security Group**: Controls access for Lambda functions
+   - Allows outbound traffic to ALB security group on port 443
+   - Allows outbound traffic to internet via NAT Gateway for DynamoDB access
 
-4. **Image Lifecycle**:
-   - Old images are retained in ECR for rollback capability
-   - You may want to set up lifecycle policies to automatically clean up old images
+### Application Load Balancer (ALB)
+- **Type**: Internal (private) Application Load Balancer
+- **Listeners**: HTTPS (port 443)
+- **Custom Domain**: deepseek.jonathanmau.com
+- **TLS Certificate**: ACM certificate (ARN: arn:aws:acm:us-west-2:034362047054:certificate/436d84a6-1cc3-432c-b5ca-d9150749a5f6)
+- **Target Group Configuration**:
+  - Protocol: HTTPS with HTTP/2 support for gRPC
+  - Port: 50051
+  - Health Check: Path: `/health`, Port: 443, Protocol: HTTPS
+  - Sticky Sessions: Enabled with cookie "LlmServiceStickiness"
+  - Deregistration Delay: 120 seconds to allow gRPC streams to complete
+
+### NAT Gateway
+- Deployed in public subnet for cost optimization
+- Allows outbound internet access for instances in private subnets
+
+### Gateway Endpoints
+- **S3 Endpoint**: Allows instances to access S3 without going through NAT Gateway
+
+### SSM Parameters
+- Stores all infrastructure values like VPC ID, subnet IDs, security group IDs, etc. for cross-stack references
+
+## LLM Service Infrastructure Stack
+
+The LLM Service Infrastructure Stack deploys the GPU instances that run the LLM service:
+
+### Auto Scaling Group
+- **Instance Type**: c5.2xlarge (can be adjusted based on inference needs)
+- **AMI**: Latest Amazon Linux 2
+- **Spot Instances**: Used for cost optimization with a max price of $0.25
+- **Min/Max Capacity**: 1/1 (can be adjusted for scaling)
+- **EBS Storage**: 30GB encrypted GP3 volume
+- **AZ Distribution**: Deployed across multiple AZs for high availability
+
+### Security
+- **IAM Role**: Instance role with permissions for:
+  - ECR image pulling
+  - CloudWatch Logs creation and management
+  - SSM Session Manager for secure instance access
+
+### Health Checks
+- **HTTPS Health Check Proxy**: Custom Python service that:
+  - Runs on port 443 with self-signed TLS certificate
+  - Bridges ALB HTTPS health checks to the container's gRPC health check
+  - Supports sticky sessions with cookie management
+  - Ensures instances are deregistered from the ALB when unhealthy
+
+### Service Container
+- **Container Image**: Pulled from private ECR repository
+- **Environment Variables**:
+  - MODEL_NAME: Specifies which LLM model to load
+  - gRPC HTTP/2 settings for optimal ALB compatibility
+  - Sticky session configuration
+
+### Auto Scaling Policies
+- **CPU Scaling**: Target tracking policy (70% target utilization)
+- **Scheduled Scaling**: Scales down during off-hours to save costs
+  - Down at 12am Central Time (6am UTC)
+  - Up at 9am Central Time (3pm UTC)
 
 ## Deployment Process
 
-### Initial Setup
-
-
-1. Add a GitHub Personal Access Token to AWS Secrets Manager with the name `deepseek-llm-service-pat` and key `github-token`
-
-2. Deploy the CI/CD pipeline stack:
+### Deployment Order
+1. Deploy the VPC Infrastructure Stack first:
    ```bash
-   npm run build
-   npx cdk deploy LlmServiceCicdPipelineStack
+   npx cdk deploy VpcInfrastructureStack
+   ```
+
+2. Then deploy the LLM Service Infrastructure Stack:
+   ```bash
    npx cdk deploy LlmServiceInfraStack
    ```
 
-### Automated CI/CD Flow
+### Prerequisites
+- ACM certificate for your custom domain
+- Environment variables in a `.env` file:
+  ```
+  DEEPSEEK_ACM_ARN=arn:aws:acm:us-west-2:034362047054:certificate/436d84a6-1cc3-432c-b5ca-d9150749a5f6
+  ```
 
-1. Changes pushed to the GitHub repository trigger the pipeline
-2. The pipeline pulls the source code
-3. CodeBuild builds the Docker image:
-   - Pre-build: Authenticates with ECR and prepares image tags
-   - Build: Attempts to build the Docker image with the commit hash tag and 'latest' tag
-   - **Issue Alert**: By default, CodeBuild looks for the Dockerfile in the root directory, but it's actually in the service/ directory
-   - Post-build (if successful): Pushes both tagged images to ECR
-4. The infrastructure stack is deployed or updated
-5. EC2 instances pull the latest image and run the service
+## Service Communication Flow
 
+1. **Client** → **API Gateway WebSockets** → **DynamoDB** (connection storage)
+2. **Client** sends message → **$message Lambda Handler** (in VPC) → **Private ALB** → **LLM Service** (on GPU instance)
+3. **LLM Service** generates response → **$message Lambda Handler** → **API Gateway WebSockets** → **Client**
 
-## Fixing the Docker Build Issue
+## Sticky Sessions Implementation
 
-To resolve the issue with CodeBuild not finding the Dockerfile, you have three options:
+The architecture implements sticky sessions to ensure that conversation state is maintained between a client and a specific LLM service instance:
 
-1. **Update the BuildSpec**: Modify the CI/CD pipeline stack to change the build command:
-   ```typescript
-   // In cicd-pipeline-stack.ts, modify the build commands section:
-   build: {
-     commands: [
-       "echo Build started on `date`",
-       "echo Building the Docker image...",
-       // Specify the Dockerfile location
-       "docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG -f service/Dockerfile .",
-       // Alternative approach
-       // "cd service && docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .",
-       "docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:latest",
-     ],
-   },
-   ```
+1. **ALB Target Group Configuration**:
+   - `stickiness.enabled` = "true"
+   - `stickiness.type` = "app_cookie"  
+   - `stickiness.app_cookie.cookie_name` = "LlmServiceStickiness"
+   - `stickiness.app_cookie.duration_seconds` = "900" (15 minutes)
 
-2. **Copy/Move Dockerfile**: Create a Dockerfile in the root that references the service Dockerfile:
-   ```dockerfile
-   # Root Dockerfile
-   FROM service/Dockerfile
-   ```
+2. **Health Check Proxy**:
+   - HTTPS-based health check proxy creates and sets sticky session cookies
+   - Implements secure cookie handling with HttpOnly and Secure flags
+   - Generates unique session IDs using UUID format
 
-3. **Repository Restructuring**: Move the Dockerfile to the repository root (least recommended)
+3. **LLM Service**:
+   - Detects existing cookies in gRPC metadata
+   - Creates and returns new cookies for new sessions
+   - Sets trailing metadata with Set-Cookie header
+   - Ensures proper cookie lifetime and security attributes
 
-## Service Docker Image
+## TLS/HTTPS Configuration
 
-The service is containerized using a multi-stage Dockerfile located in the `service/` directory:
+The architecture implements end-to-end HTTPS security:
 
-1. **Build Stage**:
-   - Uses python:3.10-slim as the base image
-   - Installs Poetry for dependency management
-   - Installs all production dependencies
-   - Generates Protocol Buffer code
-   - Copies service source code
+1. **Custom Domain**: deepseek.jonathanmau.com with ACM certificate
+2. **ALB Listener**: Uses imported ACM certificate for TLS termination
+3. **Health Check Proxy**: HTTPS with self-signed certificate
+4. **gRPC Service**: Configurable TLS support for secure communication
 
-2. **Final Stage**:
-   - Uses a clean python:3.10-slim image
-   - Copies only necessary files from the build stage
-   - Sets up environment variables with sensible defaults
-   - Includes a health check using grpcurl
-   - Exposes port 50051 for gRPC traffic
-   - Runs the LLM service with the `python -m llm_service.main` command
+## Monitoring and Logging
 
-This multi-stage approach ensures the final image is as small as possible while containing all necessary components to run the service.
-
-## Infrastructure Components in Detail
-
-### LLM Service Infrastructure
-
-- **VPC**: Provides network isolation with public and private subnets
-- **Auto Scaling Group**: Launches EC2 instances with the following configuration:
-  - Uses T3.micro instances (can be adjusted for production)
-  - Runs as spot instances to reduce costs
-  - Scales based on CPU utilization (70% threshold)
-  - Uses latest Amazon Linux 2 AMI
-  - User data script pulls and runs the Docker container
-- **Service Discovery**: Uses AWS Cloud Map to register service instances
-  - Private DNS namespace: `llm-service`
-  - A-record DNS entries for each instance
-  - Health checks via TCP
-
-### CI/CD Pipeline
-
-- **Source Stage**: Pulls code from GitHub repository
-- **Build Stage**: Builds Docker image and pushes to ECR
-- **Deploy Stage**: Deploys or updates the infrastructure stack
+- **CloudWatch Log Groups**: Captures logs from:
+  - System logs
+  - Docker container logs
+  - LLM service application logs
+  - Health check proxy logs
+- **CloudWatch Metrics**: Auto Scaling metrics for capacity planning
+- **CloudWatch Alarms**: Can be configured for operational monitoring (not implemented)
 
 ## Customization and Configuration
 
 You can customize the deployment by modifying:
 
-- EC2 instance type in `llm-service-infra-stack.ts`
-- Auto scaling parameters (min/max/desired capacity)
-- GitHub repository details in `cicd-pipeline-stack.ts`
-- Model name environment variable in the container launch command
+- **EC2 instance type** in `llm-service-infra-stack.ts` (currently c5.2xlarge)
+- **Spot instance pricing** (currently max $0.25)
+- **Auto scaling parameters** (min/max capacity, scaling policies)
+- **Model name** environment variable (currently "deepseek-r1:1.5b")
+- **ALB and health check settings** (timeouts, intervals, paths)
+
+## Security Considerations
+
+The architecture implements security best practices:
+
+1. **Network Isolation**:
+   - Private subnets for LLM service instances
+   - Security groups with least privilege
+   - Internal ALB not exposed to the internet
+
+2. **Authentication and Authorization**:
+   - API Gateway authorizers for WebSocket connections
+   - IAM roles with minimal permissions
+
+3. **Data Protection**:
+   - TLS encryption for all traffic
+   - Encrypted EBS volumes
+   - HTTPS health checks
 
 ## Useful Commands
 
@@ -178,28 +215,34 @@ You can customize the deployment by modifying:
 
 ### Common Issues
 
-1. **ECR Authentication Failures**:
-   - Check IAM roles and policies for EC2 instances
-   - Verify that the ECR repository exists
-   - Ensure the region is correctly specified
+1. **Instance Health Check Failures**:
+   - Check HTTPS health check proxy logs
+   - Verify security group allows traffic on port 443
+   - Check that the LLM service is running correctly
 
-2. **Instance Startup Issues**:
-   - Check CloudWatch Logs for user data script output
-   - Verify security group allows necessary traffic
-   - Ensure instance has internet access for pulling images
+2. **Sticky Session Issues**:
+   - Verify ALB target group has stickiness enabled
+   - Check that the LLM service is setting cookies correctly
+   - Look for Set-Cookie headers in gRPC responses
 
-3. **Image Build Failures**:
-   - Check if the Dockerfile path is correct in the build command
-   - Verify that all files referenced in the Dockerfile exist
-   - Check CodeBuild logs for specific error messages
-   - Ensure the ECR repository exists before running the pipeline
+3. **gRPC Communication Problems**:
+   - Verify HTTP/2 settings in ALB and LLM service configuration
+   - Check connection timeouts for long-running inference
+   - Verify security group rules allow gRPC traffic
+
+4. **NAT Gateway Connectivity**:
+   - Check route tables for private subnets
+   - Verify elastic IP assignment to NAT Gateway
+   - Ensure outbound traffic is permitted by security groups
 
 ## Future Improvements
 
-Consider implementing:
+Potential enhancements to consider:
 
-1. ECR lifecycle policies to manage old images
-2. More restrictive IAM permissions for deployment
-3. Enhanced monitoring and alerting
-4. Cost optimization for EC2 instances
-5. Multi-region deployment for high availability
+1. **Multi-region deployment** for global high availability
+2. **Auto scaling based on queue depth** rather than just CPU
+3. **Reserved instances** for cost optimization on baseline capacity
+4. **Enhanced monitoring** with custom CloudWatch dashboards
+5. **GPU acceleration** with optimized instance types (g4dn, g5 series)
+6. **Blue/green deployments** for zero-downtime updates
+7. **AWS PrivateLink** for secure API Gateway integration

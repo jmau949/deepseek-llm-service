@@ -44,7 +44,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WORKER_THREADS=10 \
     OLLAMA_URL="http://localhost:11434" \
     MODEL_NAME="model-name" \
-    LOG_LEVEL="INFO"
+    LOG_LEVEL="INFO" \
+    # Sticky session configuration
+    STICKY_SESSION_ENABLED="true" \
+    STICKY_SESSION_COOKIE="LlmServiceStickiness" \
+    # HTTP/2 settings for ALB
+    GRPC_ENABLE_HTTP2=1 \
+    GRPC_KEEPALIVE_TIME_MS=30000 \
+    GRPC_KEEPALIVE_TIMEOUT_MS=10000 \
+    GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \
+    GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=10000 \
+    GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \
+    # TLS settings - disabled by default
+    USE_TLS="false"
 
 WORKDIR /app
 
@@ -57,11 +69,13 @@ COPY --from=builder /build/scripts /app/scripts
 # Create an empty __init__.py in the proto directory
 RUN mkdir -p /app/proto && touch /app/proto/__init__.py
 
-# Install grpcurl for health checks
+# Install grpcurl for health checks and SSL utilities for HTTPS
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
     unzip \
+    openssl \
+    ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl
@@ -69,6 +83,9 @@ RUN apt-get update && \
 # Create health check file
 RUN echo '#!/bin/sh\ngrpcurl -plaintext localhost:$PORT list llm.LLMService 2>/dev/null || exit 1' > /healthcheck.sh && \
     chmod +x /healthcheck.sh
+
+# Create directory for TLS certificates
+RUN mkdir -p /app/certs
 
 # Expose gRPC port
 EXPOSE $PORT

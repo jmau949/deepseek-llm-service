@@ -1,83 +1,36 @@
-## Testing the Service
+# DeepSeek LLM Service
 
-Once you have the server running, you can test it using the provided example client or by writing your own client. Below are detailed instructions for both approaches.
+A gRPC service that provides inference capabilities for DeepSeek language models within an AI chatbot architecture. The service is designed to be deployed behind an AWS Application Load Balancer with sticky sessions for conversation persistence.
 
-### 1. Using the Example Client (Recommended)
+## Architecture Overview
 
-The repository includes an example client that makes it easy to test the service. Open a new terminal window (keep the server running in the original terminal) and run:
+This service is part of a larger AI chatbot architecture:
 
-#### On Linux/Mac:
-```bash
-cd llm-service
-poetry run python examples/client.py --stream --prompt "Write a function to calculate factorial"
 ```
-
-#### On Windows (PowerShell):
-```powershell
-cd llm-service
-poetry run python examples/client.py --stream --prompt "Write a function to calculate factorial"
+┌─────────────┐    ┌───────────┐    ┌──────────────┐
+│ React Client │───▶│ API Gateway│───▶│ DynamoDB    │
+│ (Frontend)   │    │ WebSockets │    │ (Connections)│
+└──────┬───────┘    └─────┬─────┘    └──────────────┘
+       │                  │                  
+       │                  ▼                  
+       │           ┌──────────────┐         
+       └──────────▶│ $message     │         
+                   │ Lambda       │         
+                   └──────┬───────┘         
+                          │         ┌─ VPC ───────────────────┐
+                          │         │                          │
+                          ▼         │      ┌───────────────┐   │
+                   ┌──────────────┐ │      │ LLM Service   │   │
+                   │ Private ALB  │─┼─────▶│ GPU Instances │   │
+                   └──────────────┘ │      └───────────────┘   │
+                          ▲         │               │          │
+                          │         │               │          │
+                          │         │      ┌────────▼────────┐ │
+                          │         │      │ NAT Gateway     │ │
+                          └─────────┼──────┤ (External Access)│ │
+                                    │      └─────────────────┘ │
+                                    └──────────────────────────┘
 ```
-
-You should see the model's response streaming to your terminal.
-
-### 2. Testing with a Custom Client
-
-If you prefer to write your own client or test with other tools:
-
-#### Using Python:
-```python
-import grpc
-from proto import llm_pb2, llm_pb2_grpc
-
-# Connect to the service
-channel = grpc.insecure_channel('localhost:50051')
-stub = llm_pb2_grpc.LLMServiceStub(channel)
-
-# Create a request
-request = llm_pb2.LLMRequest(
-    prompt="Write a function to calculate factorial",
-    parameters=llm_pb2.LLMRequest.Parameters(
-        temperature=0.7,
-        max_tokens=1000,
-        top_p=0.95
-    )
-)
-
-# Streaming request
-for response in stub.GenerateStream(request):
-    print(response.text, end="", flush=True)
-    if response.is_complete:
-        print("\nGeneration complete!")
-```
-
-#### Using grpcurl (Command Line):
-If you have grpcurl installed, you can test the service directly from the command line:
-
-```bash
-# List available services
-grpcurl -plaintext localhost:50051 list
-
-# List methods in the service
-grpcurl -plaintext localhost:50051 list llm.LLMService
-
-# Call the Generate method
-grpcurl -plaintext -d '{"prompt": "Write a function to calculate factorial", "parameters": {"temperature": 0.7, "max_tokens": 1000}}' localhost:50051 llm.LLMService/Generate
-```
-
-### 3. Troubleshooting
-
-If you encounter issues with the test client:
-
-1. **Check server logs**: Make sure the server is running and not showing errors
-2. **Verify port**: Ensure the client is connecting to the same port the server is using (default: 50051)
-3. **Check proto generation**: If you get import errors, make sure you've run the proto generation script:
-   ```bash
-   poetry run python scripts/generate_proto.py
-   ```
-4. **Import path**: If you're writing a custom client outside the repo, make sure the proto directory is in your Python path```markdown
-# LLM Service
-
-A gRPC service that provides a standardized interface to language models running on Ollama.
 
 ## Project Structure
 
@@ -86,7 +39,7 @@ llm-service/
 ├── llm_service/               # Main package
 │   ├── __init__.py            # Package initialization
 │   ├── main.py                # Entry point
-│   ├── service.py             # gRPC service implementation
+│   ├── service.py             # gRPC service implementation with sticky sessions
 │   ├── config.py              # Configuration handling
 │   └── utils/                 # Utility modules
 │       ├── __init__.py        # Package initialization
@@ -108,9 +61,85 @@ llm-service/
 │   └── generate_proto.py      # Script to generate Python code from proto
 │
 ├── pyproject.toml             # Poetry configuration (dependencies, etc.)
-├── Dockerfile                 # Container definition
+├── Dockerfile                 # Container definition with HTTPS & sticky session support
 └── README.md                  # Documentation
 ```
+
+## Key Features
+
+- **gRPC Service**: High-performance inference using gRPC and Protocol Buffers
+- **Streaming Responses**: Support for streaming model outputs for responsive UX
+- **Sticky Sessions**: Ensures conversation continuity through ALB sticky sessions
+- **HTTPS Support**: TLS encryption for secure communication
+- **Health Checks**: HTTPS-to-gRPC health check bridge for AWS ALB compatibility
+- **Docker Support**: Containerized deployment with optimized configuration
+- **Configuration Flexibility**: Environment variables for easy configuration
+
+## Sticky Session Implementation
+
+The service implements sticky sessions to ensure that client requests with ongoing conversations always route to the same server instance:
+
+### 1. Cookie Management in gRPC
+
+```python
+# In service.py
+def GenerateStream(self, request, context):
+    # Extract or create session ID for sticky sessions
+    session_id = self._get_or_create_session_id(context)
+    
+    # Set session cookie in metadata for sticky sessions
+    if self.config.sticky_session_enabled and session_id:
+        context.set_trailing_metadata([
+            ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
+        ])
+    
+    # Process request...
+```
+
+### 2. Extracting Existing Session Cookies
+
+```python
+def _get_or_create_session_id(self, context):
+    # Skip if sticky sessions are disabled
+    if not self.config.sticky_session_enabled:
+        return None
+        
+    try:
+        # Extract session from gRPC metadata (cookie header)
+        metadata = dict(context.invocation_metadata())
+        cookie = metadata.get('cookie', '')
+        
+        # Parse the cookie string to find our session cookie
+        if cookie and self.config.sticky_session_cookie in cookie:
+            # Process cookie and extract session ID
+            # ...
+            
+        # If no session cookie found, create a new one
+        import uuid
+        return str(uuid.uuid4())
+            
+    except Exception as e:
+        logger.warning(f"Error processing session cookie: {e}")
+        return None
+```
+
+### 3. AWS ALB Integration
+
+The sticky session implementation is designed to work with AWS Application Load Balancer:
+
+- The ALB is configured with app-cookie stickiness using the cookie name "LlmServiceStickiness"
+- The service reads cookies from incoming gRPC metadata and sets them in trailing metadata
+- Session cookies are returned with HTTPS security attributes (Secure, HttpOnly)
+- 15-minute expiration matches the ALB configuration
+
+## HTTPS Health Check Bridge
+
+The service includes a custom HTTPS-to-gRPC health check bridge that allows the AWS ALB to monitor the gRPC service:
+
+1. **HTTPS Health Check Endpoint**: A lightweight Python HTTPS server that listens on port 443
+2. **Self-Signed Certificate**: For TLS encryption of health check requests
+3. **gRPC Status Check**: Proxies health requests to the gRPC service using grpcurl
+4. **Cookie Support**: Sets sticky session cookies in health check responses
 
 ## Prerequisites
 
@@ -120,18 +149,12 @@ llm-service/
 
 ## Quick Start Guide
 
-### 1. Prerequisites
-
-- Python 3.8+ installed
-- Poetry installed
-- Ollama installed and running with a language model (e.g., deepseek-r1:1.5b)
-
-### 2. Setup
+### 1. Setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/llm-service.git
-cd llm-service
+git clone https://github.com/yourusername/deepseek-llm-service.git
+cd deepseek-llm-service/service
 
 # Install dependencies with Poetry
 poetry install
@@ -140,95 +163,113 @@ poetry install
 poetry run python scripts/generate_proto.py
 ```
 
-### 3. Start the Server
+### 2. Start the Server
 
 #### On Linux/Mac:
 ```bash
-MODEL_NAME="deepseek-r1:1.5b" poetry run python -m llm_service.main
+MODEL_NAME="deepseek-r1:1.5b" STICKY_SESSION_ENABLED="true" poetry run python -m llm_service.main
 ```
 
 #### On Windows (PowerShell):
 ```powershell
 $env:MODEL_NAME = "deepseek-r1:1.5b"
+$env:STICKY_SESSION_ENABLED = "true"
 poetry run python -m llm_service.main
 ```
 
-You should see output like:
-```
-2025-04-07 XX:XX:XX,XXX - llm_service - INFO - Logging initialized with level=INFO
-2025-04-07 XX:XX:XX,XXX - llm_service - INFO - Starting LLM Service
-2025-04-07 XX:XX:XX,XXX - llm_service - INFO - Configuration: port=50051, workers=10, ollama_url=http://localhost:11434, model=deepseek-r1:1.5b
-2025-04-07 XX:XX:XX,XXX - llm_service - INFO - Server started, listening on port 50051
-```
-
-### 4. Test the Service
-
-Open a new terminal window and run:
-
-#### On Linux/Mac:
-```bash
-poetry run python examples/client.py --stream --prompt "Write a function to calculate factorial"
-```
-
-#### On Windows (PowerShell):
-```powershell
-poetry run python examples/client.py --stream --prompt "Write a function to calculate factorial"
-```
-
-### 5. Expected Result
-
-You should see the model generating text in real-time, like:
-```
-Sending streaming request to localhost:50051...
-def factorial(n):
-    if n == 0 or n == 1:
-        return 1
-    else:
-        return n * factorial(n-1)
-
-# Example usage:
-print(factorial(5))  # Output: 120
-
-Generation complete!
-```
-
-
-### Configuration Options
-
-Set these environment variables to configure the service:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PORT` | gRPC server port | `50051` |
-| `WORKER_THREADS` | Number of worker threads | `10` |
-| `OLLAMA_URL` | Ollama API endpoint | `http://localhost:11434` |
-| `MODEL_NAME` | Model to use | `model-name` |
-| `LOG_LEVEL` | Logging level | `INFO` |
-
-## Testing
-
-```bash
-# Run all tests
-poetry run pytest
-
-# Run with coverage report
-poetry run pytest --cov=llm_service tests/
-
-# Run specific test file
-poetry run pytest tests/test_service.py
-```
-
-## Using Docker
-
-### Docker
+### 3. Using Docker
 
 ```bash
 # Build the image
 docker build -t llm-service:latest .
 
-# Run with the specified model
-docker run -p 50051:50051 -e MODEL_NAME="deepseek-r1:latest" -e OLLAMA_URL="http://host.docker.internal:11434" llm-service:latest
+# Run with the specified model and sticky sessions enabled
+docker run -p 50051:50051 \
+  -e MODEL_NAME="deepseek-r1:1.5b" \
+  -e STICKY_SESSION_ENABLED="true" \
+  -e STICKY_SESSION_COOKIE="LlmServiceStickiness" \
+  llm-service:latest
 ```
+
+## Testing the Service
+
+You can test the service using the provided example client:
+
+```bash
+poetry run python examples/client.py --stream --prompt "Write a function to calculate factorial"
+```
+
+### Testing Sticky Sessions
+
+To test sticky sessions locally:
+
+```bash
+# First request - creates a session cookie
+poetry run python examples/client.py --stream --cookie-jar cookies.txt --prompt "What is your name?"
+
+# Second request - uses the session cookie
+poetry run python examples/client.py --stream --cookie-jar cookies.txt --prompt "Do you remember my previous question?"
+```
+
+## Configuration Options
+
+The service offers extensive configuration through environment variables:
+
+### Server Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | gRPC server port | `50051` |
+| `WORKER_THREADS` | Number of worker threads | `10` |
+| `USE_TLS` | Enable TLS for gRPC | `false` |
+| `TLS_CERT_PATH` | Path to TLS certificate | `None` |
+| `TLS_KEY_PATH` | Path to TLS key | `None` |
+
+### Model Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OLLAMA_URL` | Ollama API endpoint | `http://localhost:11434` |
+| `MODEL_NAME` | Model to use | `model-name` |
+| `REQUEST_TIMEOUT` | Request timeout in seconds | `30` |
+
+### Sticky Session Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `STICKY_SESSION_ENABLED` | Enable sticky sessions | `true` |
+| `STICKY_SESSION_COOKIE` | Cookie name for sticky sessions | `LlmServiceStickiness` |
+
+### HTTP/2 and gRPC Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GRPC_ENABLE_HTTP2` | Enable HTTP/2 for gRPC | `1` |
+| `GRPC_KEEPALIVE_TIME_MS` | Keepalive time in ms | `30000` |
+| `GRPC_KEEPALIVE_TIMEOUT_MS` | Keepalive timeout in ms | `10000` |
+| `GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS` | Allow keepalive without calls | `1` |
+| `HTTP2_MIN_PING_INTERVAL_MS` | HTTP/2 min ping interval in ms | `10000` |
+| `HTTP2_MAX_PINGS_WITHOUT_DATA` | Max pings without data | `0` |
+
+### LLM Parameters
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DEFAULT_TEMPERATURE` | Default temperature | `0.7` |
+| `DEFAULT_MAX_TOKENS` | Default max tokens | `2048` |
+| `DEFAULT_TOP_P` | Default top-p value | `0.95` |
+| `DEFAULT_PRESENCE_PENALTY` | Default presence penalty | `0.0` |
+| `DEFAULT_FREQUENCY_PENALTY` | Default frequency penalty | `0.0` |
+
+## Cloud Deployment
+
+When deployed to AWS, the service automatically:
+
+1. Registers with an Application Load Balancer via Auto Scaling Groups
+2. Serves HTTPS health checks on port 443 for ALB health monitoring
+3. Implements sticky sessions using the specified cookie name
+4. Uses HTTP/2 with proper settings for gRPC over ALB
+5. Supports trailing metadata for cookie setting
 
 ## Development Commands
 
@@ -240,46 +281,74 @@ docker run -p 50051:50051 -e MODEL_NAME="deepseek-r1:latest" -e OLLAMA_URL="http
 | `poetry shell` | Activate the virtual environment |
 | `poetry build` | Build the package |
 
-### Example Client Code
+## Monitoring
 
-Here's a simple Python client to test the service:
+The service includes comprehensive logging:
 
-```python
-import grpc
-from proto import llm_pb2, llm_pb2_grpc
+- Request logging with prompt truncation for privacy
+- Session ID tracking for sticky session debugging
+- Error logging with full stack traces
+- Performance metrics for request handling
 
-# Connect to the service
-channel = grpc.insecure_channel('localhost:50051')
-stub = llm_pb2_grpc.LLMServiceStub(channel)
+CloudWatch logging is automatically configured when deployed to AWS through the infrastructure stack.
 
-# Create a request
-request = llm_pb2.LLMRequest(
-    prompt="Write a function to calculate fibonacci numbers",
-    parameters=llm_pb2.LLMRequest.Parameters(
-        temperature=0.7,
-        max_tokens=1000,
-        top_p=0.95
-    )
-)
+## API Documentation
 
-# For streaming responses
-try:
-    for response in stub.GenerateStream(request):
-        print(response.text, end="", flush=True)
-        if response.is_complete:
-            print("\nGeneration complete!")
-except grpc.RpcError as e:
-    print(f"RPC error: {e.code()}: {e.details()}")
+### gRPC Methods
+
+1. **GenerateStream**
+   - Streams the model's response token by token
+   - Supports sticky sessions via cookies
+   - Returns trailing metadata with session cookies
+
+2. **Generate**
+   - Returns the complete model response in one call
+   - Supports the same parameters as GenerateStream
+   - Useful for non-streaming clients
+
+### Request Parameters
+
+```protobuf
+message LLMRequest {
+  string prompt = 1;
+  
+  message Parameters {
+    float temperature = 1;
+    int32 max_tokens = 2;
+    float top_p = 3;
+    float presence_penalty = 4;
+    float frequency_penalty = 5;
+  }
+  
+  Parameters parameters = 2;
+}
 ```
 
-Or use the provided example client:
+## Troubleshooting
 
-```bash
-# Run the example client
-MODEL_NAME="deepseek-r1:1.5b" poetry run python examples/client.py --stream
-```
+### Common Issues
 
-## License
+1. **gRPC Connection Errors**
+   - Check if the server is running
+   - Verify port is correct and not blocked
+   - Check TLS configuration if enabled
 
-[Your license here]
-```
+2. **Sticky Session Issues**
+   - Verify STICKY_SESSION_ENABLED is true
+   - Check cookie handling in client code
+   - Look for Set-Cookie in trailing metadata
+
+3. **Performance Problems**
+   - Adjust worker thread count
+   - Ensure appropriate instance size in AWS
+   - Monitor CPU and memory usage
+
+## Future Improvements
+
+Potential enhancements to consider:
+
+1. **Context Management**: Implement server-side conversation context tracking
+2. **Advanced Routing**: Session affinity based on conversation context
+3. **Authentication**: Integrate with API Gateway authentication mechanisms
+4. **Prometheus Metrics**: Export metrics for detailed performance monitoring
+5. **Session Persistence**: DynamoDB backing for session state beyond instance lifecycle

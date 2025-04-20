@@ -36,6 +36,17 @@ class Config:
     default_presence_penalty: float = 0.0
     default_frequency_penalty: float = 0.0
     
+    # Sticky session settings for ALB
+    sticky_session_enabled: bool = True
+    sticky_session_cookie: str = "LlmServiceStickiness"
+    
+    # gRPC HTTP/2 settings for use with AWS ALB
+    http2_min_ping_interval_ms: int = 10000
+    http2_max_pings_without_data: int = 0
+    keepalive_time_ms: int = 30000
+    keepalive_timeout_ms: int = 10000
+    keepalive_permit_without_calls: bool = True
+    
     # Logging settings
     log_level: str = "INFO"
     log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -144,6 +155,29 @@ class Config:
         if 'DEFAULT_FREQUENCY_PENALTY' in os.environ:
             self.default_frequency_penalty = float(os.environ['DEFAULT_FREQUENCY_PENALTY'])
             
+        # Sticky session settings
+        if 'STICKY_SESSION_ENABLED' in os.environ:
+            self.sticky_session_enabled = os.environ['STICKY_SESSION_ENABLED'].lower() in ('true', 'yes', '1')
+            
+        if 'STICKY_SESSION_COOKIE' in os.environ:
+            self.sticky_session_cookie = os.environ['STICKY_SESSION_COOKIE']
+            
+        # HTTP/2 settings
+        if 'HTTP2_MIN_PING_INTERVAL_MS' in os.environ:
+            self.http2_min_ping_interval_ms = int(os.environ['HTTP2_MIN_PING_INTERVAL_MS'])
+            
+        if 'HTTP2_MAX_PINGS_WITHOUT_DATA' in os.environ:
+            self.http2_max_pings_without_data = int(os.environ['HTTP2_MAX_PINGS_WITHOUT_DATA'])
+            
+        if 'KEEPALIVE_TIME_MS' in os.environ:
+            self.keepalive_time_ms = int(os.environ['KEEPALIVE_TIME_MS'])
+            
+        if 'KEEPALIVE_TIMEOUT_MS' in os.environ:
+            self.keepalive_timeout_ms = int(os.environ['KEEPALIVE_TIMEOUT_MS'])
+            
+        if 'KEEPALIVE_PERMIT_WITHOUT_CALLS' in os.environ:
+            self.keepalive_permit_without_calls = os.environ['KEEPALIVE_PERMIT_WITHOUT_CALLS'].lower() in ('true', 'yes', '1')
+            
         # Logging settings
         if 'LOG_LEVEL' in os.environ:
             self.log_level = os.environ['LOG_LEVEL']
@@ -189,3 +223,20 @@ class Config:
             
         if self.default_top_p <= 0 or self.default_top_p > 1:
             raise ValueError(f"Invalid top-p: {self.default_top_p}")
+            
+        # Validate sticky session settings
+        if self.sticky_session_enabled and not self.sticky_session_cookie:
+            raise ValueError("Sticky session cookie name is required when enabled")
+            
+        # Validate HTTP/2 parameters
+        if self.http2_min_ping_interval_ms < 0:
+            raise ValueError(f"Invalid HTTP/2 min ping interval: {self.http2_min_ping_interval_ms}")
+            
+        if self.http2_max_pings_without_data < 0:
+            raise ValueError(f"Invalid HTTP/2 max pings without data: {self.http2_max_pings_without_data}")
+            
+        if self.keepalive_time_ms < 0:
+            raise ValueError(f"Invalid keepalive time: {self.keepalive_time_ms}")
+            
+        if self.keepalive_timeout_ms < 0:
+            raise ValueError(f"Invalid keepalive timeout: {self.keepalive_timeout_ms}")
