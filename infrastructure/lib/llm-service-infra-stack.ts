@@ -263,6 +263,20 @@ export class LlmServiceInfraStack extends cdk.Stack {
         "systemctl start docker",
         "systemctl enable docker",
 
+        // Install Ollama
+        "echo 'Installing Ollama...'",
+        "curl -fsSL https://ollama.com/install.sh | sh",
+        "systemctl enable ollama",
+        "systemctl start ollama",
+        "sleep 5", // Wait for Ollama to initialize
+        "echo 'Ollama installed and started. Pulling model...'",
+        // Pull the specified model to ensure it's available
+        `ollama pull ${modelName}`,
+        "echo 'Model pulled successfully'",
+
+        // Set up Ollama logging to be captured by CloudWatch
+        "journalctl -u ollama -f > /var/log/ollama.log &",
+
         // Install necessary packages for HTTPS health checks
         "pip3 install cryptography pyopenssl",
 
@@ -284,6 +298,12 @@ export class LlmServiceInfraStack extends cdk.Stack {
             "log_group_name": "${logGroup.logGroupName}",
             "log_stream_name": "{instance_id}/docker",
             "retention_in_days": 7
+          },
+          {
+            "file_path": "/var/log/ollama.log",
+            "log_group_name": "${logGroup.logGroupName}",
+            "log_stream_name": "{instance_id}/ollama",
+            "retention_in_days": 7
           }
         ]
       }
@@ -302,6 +322,7 @@ EOF`,
         `docker run -d --name llm-service --restart always \\
           -p ${llmServicePort}:${llmServicePort} \\
           -e MODEL_NAME="${modelName}" \\
+          -e OLLAMA_URL="http://host.docker.internal:11434" \\
           -e GRPC_ENABLE_HTTP2=1 \\
           -e GRPC_KEEPALIVE_TIME_MS=10000 \\
           -e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \\
@@ -309,6 +330,7 @@ EOF`,
           -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 \\
           -e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \\
           -e STICKY_SESSION_COOKIE="LlmServiceStickiness" \\
+          --add-host=host.docker.internal:host-gateway \\
           --log-driver=awslogs \\
           --log-opt awslogs-group=${logGroup.logGroupName} \\
           --log-opt awslogs-region=${this.region} \\
@@ -366,7 +388,21 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     
     def _check_grpc_health(self):
         try:
-            # Use the exact same command as in the container's HEALTHCHECK
+            # First check if Ollama service is running
+            result_ollama = subprocess.run(
+                ["systemctl", "is-active", "ollama"],
+                capture_output=True, timeout=1
+            )
+            
+            if result_ollama.returncode != 0:
+                # Ollama service is not running
+                self.send_response(503)
+                self.send_header('Content-Type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'Ollama Service Unavailable')
+                return
+                
+            # Then check if gRPC service is healthy
             result = subprocess.run(
                 ["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"],
                 capture_output=True, timeout=1
@@ -447,7 +483,27 @@ EOF`,
         `chmod +x /opt/health-proxy/https_grpc_health_proxy.py`,
         `systemctl daemon-reload`,
         `systemctl enable health-proxy`,
-        `systemctl start health-proxy`
+        `systemctl start health-proxy`,
+
+        // Create a systemd service for running Docker container that depends on Ollama
+        `cat > /etc/systemd/system/llm-service.service << 'EOF'
+[Unit]
+Description=LLM Service Container
+After=docker.service ollama.service
+Requires=docker.service ollama.service
+
+[Service]
+Restart=always
+ExecStartPre=-/usr/bin/docker stop llm-service
+ExecStartPre=-/usr/bin/docker rm llm-service
+ExecStart=/usr/bin/docker start llm-service
+ExecStop=/usr/bin/docker stop llm-service
+
+[Install]
+WantedBy=multi-user.target
+EOF`,
+        `systemctl daemon-reload`,
+        `systemctl enable llm-service`
       );
 
       /**
