@@ -263,15 +263,27 @@ export class LlmServiceInfraStack extends cdk.Stack {
         "systemctl start docker",
         "systemctl enable docker",
 
-        // Install Docker Compose for better container orchestration
-        "pip3 install docker-compose",
+        // Fix the Docker Compose installation - use Docker's native compose plugin instead
+        "mkdir -p /usr/local/lib/docker/cli-plugins",
+        "curl -SL https://github.com/docker/compose/releases/download/v2.5.0/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose",
+        "chmod +x /usr/local/lib/docker/cli-plugins/docker-compose",
+        "ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/bin/docker-compose",
 
         // Install necessary packages for HTTPS health checks
-        "pip3 install cryptography pyopenssl",
+        "pip3 install 'urllib3<2.0' 'cryptography<40.0.0' 'pyopenssl<23.0.0'",
 
-        // Configure CloudWatch agent
+        // Create necessary directories for all scripts and logs
+        "mkdir -p /opt/llm-service /opt/health-proxy /opt/health-proxy/certs /var/log",
+        "touch /var/log/container-watchdog.log /var/log/health-proxy.log /var/log/init-model.log /var/log/container-start.log",
+        "chmod 644 /var/log/container-watchdog.log /var/log/health-proxy.log /var/log/init-model.log /var/log/container-start.log",
+
+        // Configure CloudWatch agent with improved log collection
         `cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
 {
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
+  },
   "logs": {
     "logs_collected": {
       "files": {
@@ -287,107 +299,128 @@ export class LlmServiceInfraStack extends cdk.Stack {
             "log_group_name": "${logGroup.logGroupName}",
             "log_stream_name": "{instance_id}/docker",
             "retention_in_days": 7
+          },
+          {
+            "file_path": "/var/log/container-watchdog.log",
+            "log_group_name": "${logGroup.logGroupName}",
+            "log_stream_name": "{instance_id}/watchdog",
+            "retention_in_days": 7,
+            "timestamp_format": "%Y-%m-%d %H:%M:%S"
+          },
+          {
+            "file_path": "/var/log/health-proxy.log",
+            "log_group_name": "${logGroup.logGroupName}",
+            "log_stream_name": "{instance_id}/health-proxy",
+            "retention_in_days": 7
+          },
+          {
+            "file_path": "/var/log/init-model.log",
+            "log_group_name": "${logGroup.logGroupName}",
+            "log_stream_name": "{instance_id}/init-model",
+            "retention_in_days": 7
+          },
+          {
+            "file_path": "/var/log/container-start.log",
+            "log_group_name": "${logGroup.logGroupName}",
+            "log_stream_name": "{instance_id}/container-start",
+            "retention_in_days": 7,
+            "timestamp_format": "%Y-%m-%d %H:%M:%S"
           }
         ]
       }
-    }
+    },
+    "force_flush_interval": 15
+  },
+  "metrics": {
+    "metrics_collected": {
+      "disk": {
+        "measurement": [
+          "used_percent"
+        ],
+        "resources": [
+          "/"
+        ]
+      },
+      "mem": {
+        "measurement": [
+          "mem_used_percent"
+        ]
+      },
+      "swap": {
+        "measurement": [
+          "swap_used_percent"
+        ]
+      }
+    },
+    "append_dimensions": {
+      "ImageId": "\${aws:ImageId}",
+      "InstanceId": "\${aws:InstanceId}",
+      "InstanceType": "\${aws:InstanceType}",
+      "AutoScalingGroupName": "\${aws:AutoScalingGroupName}"
+    },
+    "aggregation_dimensions": [
+      ["InstanceId"],
+      ["AutoScalingGroupName"]
+    ]
   }
 }
 EOF`,
         "systemctl start amazon-cloudwatch-agent",
         "systemctl enable amazon-cloudwatch-agent",
 
-        // Create the Docker Compose file for service orchestration
-        `mkdir -p /opt/llm-service`,
-        `cat > /opt/llm-service/docker-compose.yml << 'EOF'
-version: '3'
-
-networks:
-  llm-network:
-    driver: bridge
-
-volumes:
-  ollama-data:
-    driver: local
-
-services:
-  # Ollama service to host and serve LLM models
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: always
-    volumes:
-      - ollama-data:/root/.ollama
-    networks:
-      - llm-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-    logging:
-      driver: awslogs
-      options:
-        awslogs-group: ${logGroup.logGroupName}
-        awslogs-region: ${this.region}
-        awslogs-stream: "{instance_id}/ollama"
-
-  # LLM Service that provides gRPC interface
-  llm-service:
-    image: ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest
-    container_name: llm-service
-    restart: always
-    depends_on:
-      - ollama
-    ports:
-      - "${llmServicePort}:${llmServicePort}"
-    environment:
-      - PORT=${llmServicePort}
-      - WORKER_THREADS=10
-      - OLLAMA_URL=http://ollama:11434
-      - MODEL_NAME=${modelName}
-      - LOG_LEVEL=INFO
-      - GRPC_ENABLE_HTTP2=1
-      - GRPC_KEEPALIVE_TIME_MS=10000
-      - GRPC_KEEPALIVE_TIMEOUT_MS=5000
-      - GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1
-      - GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000
-      - GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0
-      - STICKY_SESSION_COOKIE=LlmServiceStickiness
-    networks:
-      - llm-network
-    healthcheck:
-      test: ["CMD", "grpcurl", "-plaintext", "localhost:${llmServicePort}", "list", "llm.LLMService"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    logging:
-      driver: awslogs
-      options:
-        awslogs-group: ${logGroup.logGroupName}
-        awslogs-region: ${this.region}
-        awslogs-stream: "{instance_id}/llm-service"
-EOF`,
-
-        // Pull the necessary containers
-        `aws ecr get-login-password --region ${this.region} | docker login --username AWS --password-stdin ${this.account}.dkr.ecr.${this.region}.amazonaws.com`,
+        // Remove Docker Compose related files and commands
+        `rm -f /opt/llm-service/docker-compose.yml`,
 
         // Create init script to pull the model after the container starts
         `cat > /opt/llm-service/init-model.sh << 'EOF'
 #!/bin/bash
 # Wait for Ollama to be ready (max 3 minutes)
-echo "Waiting for Ollama to be ready..."
+
+# Set up logging
+LOG_FILE="/var/log/init-model.log"
+MAX_SIZE=1048576  # 1MB
+
+# Function for logging with timestamps
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a $LOG_FILE
+  
+  # Check if log needs rotation
+  if [ -f "$LOG_FILE" ] && [ $(stat -c%s "$LOG_FILE") -gt $MAX_SIZE ]; then
+    mv "$LOG_FILE" "$LOG_FILE.old"
+    touch "$LOG_FILE"
+    log "Log file rotated due to size"
+  fi
+}
+
+log "Starting model initialization script"
+log "Waiting for Ollama to be ready..."
+
 START_TIME=$(date +%s)
 TIMEOUT=180
 
 while true; do
-  # Check if Ollama is ready
+  # Check if Ollama is running first
+  if ! docker ps | grep -q "ollama"; then
+    log "Ollama container is not running. Will retry..."
+    sleep 5
+    continue
+  fi
+
+  # Check if Ollama API is ready
   if docker exec ollama curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
-    echo "Ollama is ready, pulling model: ${modelName}"
-    docker exec ollama ollama pull ${modelName}
-    echo "Model pulled successfully"
+    log "Ollama is ready, pulling model: ${modelName}"
+    
+    # Start model pull with progress logging
+    docker exec ollama ollama pull ${modelName} 2>&1 | while IFS= read -r line; do
+      log "Model pull progress: $line"
+    done
+    
+    PULL_STATUS=$?
+    if [ $PULL_STATUS -eq 0 ]; then
+      log "Model pulled successfully"
+    else
+      log "Error pulling model, exit code: $PULL_STATUS"
+    fi
     break
   fi
   
@@ -395,21 +428,25 @@ while true; do
   ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
   
   if [ $ELAPSED_TIME -gt $TIMEOUT ]; then
-    echo "Timeout waiting for Ollama. Will retry later."
+    log "Timeout waiting for Ollama after $ELAPSED_TIME seconds. Will retry later."
     break
   fi
   
-  echo "Ollama is not ready yet, waiting (elapsed: $ELAPSED_TIME s)..."
-  sleep 10
+  if [ $((ELAPSED_TIME % 10)) -eq 0 ]; then
+    log "Ollama is not ready yet, waiting (elapsed: $ELAPSED_TIME s)..."
+  fi
+  sleep 5
 done
+
+log "Model initialization script completed"
 EOF`,
         "chmod +x /opt/llm-service/init-model.sh",
 
-        // Start the services with Docker Compose
-        "cd /opt/llm-service && docker-compose up -d",
+        // Start the services without Docker Compose
+        "cd /opt/llm-service && ./start-containers.sh",
 
         // Run the model initialization in the background
-        "cd /opt/llm-service && nohup ./init-model.sh > /var/log/init-model.log 2>&1 &",
+        "cd /opt/llm-service && nohup ./init-model.sh 2>&1 &",
 
         // Install bare minimum health check requirements - grpcurl
         `curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl`,
@@ -438,13 +475,32 @@ import ssl
 import uuid
 import time
 import logging
+import logging.handlers
 from http.cookies import SimpleCookie
 
-# Set up logging
+# Set up rotating file handler for logging
+log_file = '/var/log/health-proxy.log'
+max_log_size = 10 * 1024 * 1024  # 10MB
+backup_count = 5
+
+# Create log directory if it doesn't exist
+os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+# Configure rotating file handler
+file_handler = logging.handlers.RotatingFileHandler(
+    log_file,
+    maxBytes=max_log_size,
+    backupCount=backup_count
+)
+
+# Configure logging
 logging.basicConfig(
-    filename='/var/log/health-proxy.log',
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        file_handler,
+        logging.StreamHandler()  # Also log to console
+    ]
 )
 
 # Configuration
@@ -481,6 +537,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
             self._set_sticky_session_cookie()
             self.end_headers()
             self.wfile.write(json.dumps({"status": "healthy"}).encode())
+            logging.debug("Health check passed: Both services are healthy")
         else:
             # One or both services are unhealthy
             self.send_response(503)
@@ -504,7 +561,10 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
                 capture_output=True, timeout=2
             )
             
-            return result.returncode == 0 and b"llm.LLMService" in result.stdout
+            is_healthy = result.returncode == 0 and b"llm.LLMService" in result.stdout
+            if not is_healthy:
+                logging.error(f"gRPC health check failed with exit code {result.returncode}: {result.stderr.decode()}")
+            return is_healthy
         except Exception as e:
             logging.error(f"Error checking gRPC health: {str(e)}")
             return False
@@ -517,7 +577,10 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
                 capture_output=True, timeout=2
             )
             
-            return result.returncode == 0
+            is_healthy = result.returncode == 0
+            if not is_healthy:
+                logging.error(f"Ollama health check failed with exit code {result.returncode}: {result.stderr.decode()}")
+            return is_healthy
         except Exception as e:
             logging.error(f"Error checking Ollama health: {str(e)}")
             return False
@@ -538,6 +601,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
             # Set cookie with appropriate attributes for ALB stickiness
             self.send_header('Set-Cookie', 
                 f'{COOKIE_NAME}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
+            logging.debug(f"Set new sticky session cookie: {session_id}")
 
 if __name__ == "__main__":
     logging.info(f"Starting HTTPS-to-gRPC health check proxy on port {PORT}")
@@ -552,9 +616,10 @@ if __name__ == "__main__":
     httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
     
     try:
+        logging.info("Health check proxy server is ready to accept connections")
         httpd.serve_forever()
     except Exception as e:
-        logging.error(f"Server error: {e}")
+        logging.error(f"Server error: {e}", exc_info=True)
 EOF`,
 
         // Create a watchdog script to monitor and repair the containers if needed
@@ -563,9 +628,58 @@ EOF`,
 # Container Watchdog script to monitor and repair services if needed
 
 LOG_FILE="/var/log/container-watchdog.log"
+MAX_SIZE=10485760  # 10MB in bytes
+BACKUP_COUNT=5
+
+# Set up log rotation
+setup_log_rotation() {
+  # Create logrotate config if it doesn't exist
+  if [ ! -f /etc/logrotate.d/container-watchdog ]; then
+    cat > /etc/logrotate.d/container-watchdog << LOGROTATE_EOF
+/var/log/container-watchdog.log {
+    size 10M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    create 0644 root root
+}
+LOGROTATE_EOF
+    # Force initial log rotation setup
+    logrotate -f /etc/logrotate.d/container-watchdog
+  fi
+}
 
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> $LOG_FILE
+  
+  # Check log size and rotate if needed
+  if [ -f "$LOG_FILE" ]; then
+    log_size=$(stat -c%s "$LOG_FILE")
+    if [ "$log_size" -gt "$MAX_SIZE" ]; then
+      logrotate -f /etc/logrotate.d/container-watchdog
+    fi
+  fi
+}
+
+restart_ollama() {
+  log "Restarting Ollama container..."
+  docker restart ollama
+  log "Ollama restart initiated"
+}
+
+restart_llm_service() {
+  log "Restarting LLM Service container..."
+  docker restart llm-service
+  log "LLM Service restart initiated"
+}
+
+restart_all_services() {
+  log "Restarting all containers..."
+  docker restart ollama
+  sleep 10
+  docker restart llm-service
+  log "All services restart initiated"
 }
 
 check_and_restart_services() {
@@ -574,33 +688,37 @@ check_and_restart_services() {
   # Check if the Ollama container is running and healthy
   if ! docker ps | grep -q "ollama"; then
     log "Ollama container is not running. Attempting to restart all services..."
-    cd /opt/llm-service && docker-compose restart
+    restart_all_services
     return
   fi
   
   # Check if the LLM service container is running and healthy
   if ! docker ps | grep -q "llm-service"; then
     log "LLM service container is not running. Attempting to restart all services..."
-    cd /opt/llm-service && docker-compose restart
+    restart_all_services
     return
   fi
   
   # Check Ollama API health
   if ! docker exec ollama curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
     log "Ollama API not responding. Restarting Ollama container..."
-    cd /opt/llm-service && docker-compose restart ollama
+    restart_ollama
     return
   fi
   
   # Check LLM Service gRPC health
   if ! grpcurl -plaintext localhost:${llmServicePort} list llm.LLMService > /dev/null 2>&1; then
     log "LLM Service not responding. Restarting LLM Service container..."
-    cd /opt/llm-service && docker-compose restart llm-service
+    restart_llm_service
     return
   fi
   
-  log "All services are healthy."
+  log "All services are healthy"
 }
+
+# Initialize log file if it doesn't exist
+touch $LOG_FILE
+setup_log_rotation
 
 log "Starting container watchdog"
 while true; do
@@ -609,6 +727,74 @@ while true; do
 done
 EOF`,
         "chmod +x /opt/llm-service/watchdog.sh",
+
+        // Also update our model initialization script to not depend on Docker Compose
+        `cat > /opt/llm-service/start-containers.sh << 'EOF'
+#!/bin/bash
+# Start containers manually without Docker Compose
+
+LOG_FILE="/var/log/container-start.log"
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a $LOG_FILE
+}
+
+log "Starting containers..."
+
+# Create network if it doesn't exist
+if ! docker network ls | grep -q llm-network; then
+  log "Creating Docker network: llm-network"
+  docker network create llm-network
+fi
+
+# Start Ollama container
+if ! docker ps | grep -q ollama; then
+  log "Starting Ollama container..."
+  docker run -d --name ollama --restart always \
+    --network llm-network \
+    -v ollama-data:/root/.ollama \
+    --log-driver=awslogs \
+    --log-opt awslogs-group=${logGroup.logGroupName} \
+    --log-opt awslogs-region=${this.region} \
+    --log-opt awslogs-stream="{instance_id}/ollama" \
+    ollama/ollama:latest
+fi
+
+# Wait for Ollama to initialize
+log "Waiting for Ollama to initialize..."
+sleep 10
+
+# Start LLM Service container
+if ! docker ps | grep -q llm-service; then
+  log "Starting LLM Service container..."
+  docker run -d --name llm-service --restart always \
+    --network llm-network \
+    -p ${llmServicePort}:${llmServicePort} \
+    -e PORT=${llmServicePort} \
+    -e WORKER_THREADS=10 \
+    -e OLLAMA_URL=http://ollama:11434 \
+    -e MODEL_NAME=${modelName} \
+    -e LOG_LEVEL=INFO \
+    -e GRPC_ENABLE_HTTP2=1 \
+    -e GRPC_KEEPALIVE_TIME_MS=10000 \
+    -e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \
+    -e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \
+    -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 \
+    -e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \
+    -e STICKY_SESSION_COOKIE=LlmServiceStickiness \
+    --log-driver=awslogs \
+    --log-opt awslogs-group=${logGroup.logGroupName} \
+    --log-opt awslogs-region=${this.region} \
+    --log-opt awslogs-stream="{instance_id}/llm-service" \
+    ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest
+fi
+
+log "Containers started successfully"
+EOF`,
+        "chmod +x /opt/llm-service/start-containers.sh",
+
+        // Update how we run the containers
+        "cd /opt/llm-service && ./start-containers.sh",
 
         // Create a systemd service for the health check proxy
         `cat > /etc/systemd/system/health-proxy.service << 'EOF'
@@ -624,6 +810,9 @@ RestartSec=3
 CPUQuota=5%
 MemoryLimit=25M
 Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=health-proxy
 
 [Install]
 WantedBy=multi-user.target
@@ -640,6 +829,9 @@ Requires=docker.service
 ExecStart=/opt/llm-service/watchdog.sh
 Restart=always
 RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=container-watchdog
 
 [Install]
 WantedBy=multi-user.target
