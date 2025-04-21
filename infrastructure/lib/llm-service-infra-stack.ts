@@ -263,6 +263,9 @@ export class LlmServiceInfraStack extends cdk.Stack {
         "systemctl start docker",
         "systemctl enable docker",
 
+        // Install Docker Compose for better container orchestration
+        "pip3 install docker-compose",
+
         // Install necessary packages for HTTPS health checks
         "pip3 install cryptography pyopenssl",
 
@@ -294,26 +297,119 @@ EOF`,
         "systemctl start amazon-cloudwatch-agent",
         "systemctl enable amazon-cloudwatch-agent",
 
-        // Pull and run the LLM service container
-        `aws ecr get-login-password --region ${this.region} | docker login --username AWS --password-stdin ${this.account}.dkr.ecr.${this.region}.amazonaws.com`,
-        `docker pull ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
+        // Create the Docker Compose file for service orchestration
+        `mkdir -p /opt/llm-service`,
+        `cat > /opt/llm-service/docker-compose.yml << 'EOF'
+version: '3'
 
-        // Run the container with environment variables for gRPC sticky sessions
-        `docker run -d --name llm-service --restart always \\
-          -p ${llmServicePort}:${llmServicePort} \\
-          -e MODEL_NAME="${modelName}" \\
-          -e GRPC_ENABLE_HTTP2=1 \\
-          -e GRPC_KEEPALIVE_TIME_MS=10000 \\
-          -e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \\
-          -e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \\
-          -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 \\
-          -e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \\
-          -e STICKY_SESSION_COOKIE="LlmServiceStickiness" \\
-          --log-driver=awslogs \\
-          --log-opt awslogs-group=${logGroup.logGroupName} \\
-          --log-opt awslogs-region=${this.region} \\
-          --log-opt awslogs-stream={instance_id}/llm-service \\
-          ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
+networks:
+  llm-network:
+    driver: bridge
+
+volumes:
+  ollama-data:
+    driver: local
+
+services:
+  # Ollama service to host and serve LLM models
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: always
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - llm-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: ${logGroup.logGroupName}
+        awslogs-region: ${this.region}
+        awslogs-stream: "{instance_id}/ollama"
+
+  # LLM Service that provides gRPC interface
+  llm-service:
+    image: ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest
+    container_name: llm-service
+    restart: always
+    depends_on:
+      - ollama
+    ports:
+      - "${llmServicePort}:${llmServicePort}"
+    environment:
+      - PORT=${llmServicePort}
+      - WORKER_THREADS=10
+      - OLLAMA_URL=http://ollama:11434
+      - MODEL_NAME=${modelName}
+      - LOG_LEVEL=INFO
+      - GRPC_ENABLE_HTTP2=1
+      - GRPC_KEEPALIVE_TIME_MS=10000
+      - GRPC_KEEPALIVE_TIMEOUT_MS=5000
+      - GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1
+      - GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000
+      - GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0
+      - STICKY_SESSION_COOKIE=LlmServiceStickiness
+    networks:
+      - llm-network
+    healthcheck:
+      test: ["CMD", "grpcurl", "-plaintext", "localhost:${llmServicePort}", "list", "llm.LLMService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: ${logGroup.logGroupName}
+        awslogs-region: ${this.region}
+        awslogs-stream: "{instance_id}/llm-service"
+EOF`,
+
+        // Pull the necessary containers
+        `aws ecr get-login-password --region ${this.region} | docker login --username AWS --password-stdin ${this.account}.dkr.ecr.${this.region}.amazonaws.com`,
+
+        // Create init script to pull the model after the container starts
+        `cat > /opt/llm-service/init-model.sh << 'EOF'
+#!/bin/bash
+# Wait for Ollama to be ready (max 3 minutes)
+echo "Waiting for Ollama to be ready..."
+START_TIME=$(date +%s)
+TIMEOUT=180
+
+while true; do
+  # Check if Ollama is ready
+  if docker exec ollama curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
+    echo "Ollama is ready, pulling model: ${modelName}"
+    docker exec ollama ollama pull ${modelName}
+    echo "Model pulled successfully"
+    break
+  fi
+  
+  CURRENT_TIME=$(date +%s)
+  ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+  
+  if [ $ELAPSED_TIME -gt $TIMEOUT ]; then
+    echo "Timeout waiting for Ollama. Will retry later."
+    break
+  fi
+  
+  echo "Ollama is not ready yet, waiting (elapsed: $ELAPSED_TIME s)..."
+  sleep 10
+done
+EOF`,
+        "chmod +x /opt/llm-service/init-model.sh",
+
+        // Start the services with Docker Compose
+        "cd /opt/llm-service && docker-compose up -d",
+
+        // Run the model initialization in the background
+        "cd /opt/llm-service && nohup ./init-model.sh > /var/log/init-model.log 2>&1 &",
 
         // Install bare minimum health check requirements - grpcurl
         `curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl`,
@@ -325,7 +421,7 @@ EOF`,
           -keyout /opt/health-proxy/certs/server.key \\
           -out /opt/health-proxy/certs/server.crt`,
 
-        // Create an HTTPS-to-gRPC health check bridge with support for sticky sessions
+        // Update the HTTPS-to-gRPC health check to properly check both containers
         `mkdir -p /opt/health-proxy`,
         `cat > /opt/health-proxy/https_grpc_health_proxy.py << 'EOF'
 #!/usr/bin/env python3
@@ -340,7 +436,16 @@ import json
 import os
 import ssl
 import uuid
+import time
+import logging
 from http.cookies import SimpleCookie
+
+# Set up logging
+logging.basicConfig(
+    filename='/var/log/health-proxy.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # Configuration
 PORT = 443
@@ -356,7 +461,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     
     def do_GET(self):
         if self.path == '/health':
-            self._check_grpc_health()
+            self._check_health()
         else:
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -364,33 +469,58 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok"}).encode())
     
+    def _check_health(self):
+        # Check both services - the gRPC service and Ollama
+        grpc_healthy = self._check_grpc_health()
+        ollama_healthy = self._check_ollama_health()
+        
+        if grpc_healthy and ollama_healthy:
+            # Both services are healthy
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self._set_sticky_session_cookie()
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "healthy"}).encode())
+        else:
+            # One or both services are unhealthy
+            self.send_response(503)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            if not grpc_healthy and not ollama_healthy:
+                self.wfile.write(b'Both services unavailable')
+                logging.warning("Health check failed: Both services unavailable")
+            elif not grpc_healthy:
+                self.wfile.write(b'LLM Service unavailable')
+                logging.warning("Health check failed: LLM Service unavailable")
+            else:
+                self.wfile.write(b'Ollama Service unavailable')
+                logging.warning("Health check failed: Ollama Service unavailable")
+    
     def _check_grpc_health(self):
         try:
             # Use the exact same command as in the container's HEALTHCHECK
             result = subprocess.run(
                 ["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"],
-                capture_output=True, timeout=1
+                capture_output=True, timeout=2
             )
             
-            if result.returncode == 0 and b"llm.LLMService" in result.stdout:
-                # Service is healthy
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self._set_sticky_session_cookie()
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "healthy"}).encode())
-            else:
-                # Service unhealthy
-                self.send_response(503)
-                self.send_header('Content-Type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'Service Unavailable')
+            return result.returncode == 0 and b"llm.LLMService" in result.stdout
         except Exception as e:
-            # Any errors indicate unhealthy state
-            self.send_response(503)
-            self.send_header('Content-Type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(f"Service Unavailable: {str(e)}".encode())
+            logging.error(f"Error checking gRPC health: {str(e)}")
+            return False
+    
+    def _check_ollama_health(self):
+        try:
+            # Check if Ollama container is running and responding
+            result = subprocess.run(
+                ["docker", "exec", "ollama", "curl", "-s", "-f", "http://localhost:11434/api/tags"],
+                capture_output=True, timeout=2
+            )
+            
+            return result.returncode == 0
+        except Exception as e:
+            logging.error(f"Error checking Ollama health: {str(e)}")
+            return False
     
     def _set_sticky_session_cookie(self):
         """Set a sticky session cookie for ALB sticky routing"""
@@ -410,7 +540,10 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
                 f'{COOKIE_NAME}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
 
 if __name__ == "__main__":
-    print(f"Starting HTTPS-to-gRPC health check proxy on port {PORT}")
+    logging.info(f"Starting HTTPS-to-gRPC health check proxy on port {PORT}")
+    
+    # Wait for services to start
+    time.sleep(10)
     
     # Set up HTTPS server with SSL context
     httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
@@ -421,10 +554,63 @@ if __name__ == "__main__":
     try:
         httpd.serve_forever()
     except Exception as e:
-        print(f"Server error: {e}")
+        logging.error(f"Server error: {e}")
 EOF`,
 
-        // Create a systemd service for reliability but with minimal overhead
+        // Create a watchdog script to monitor and repair the containers if needed
+        `cat > /opt/llm-service/watchdog.sh << 'EOF'
+#!/bin/bash
+# Container Watchdog script to monitor and repair services if needed
+
+LOG_FILE="/var/log/container-watchdog.log"
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> $LOG_FILE
+}
+
+check_and_restart_services() {
+  log "Checking container health..."
+  
+  # Check if the Ollama container is running and healthy
+  if ! docker ps | grep -q "ollama"; then
+    log "Ollama container is not running. Attempting to restart all services..."
+    cd /opt/llm-service && docker-compose restart
+    return
+  fi
+  
+  # Check if the LLM service container is running and healthy
+  if ! docker ps | grep -q "llm-service"; then
+    log "LLM service container is not running. Attempting to restart all services..."
+    cd /opt/llm-service && docker-compose restart
+    return
+  fi
+  
+  # Check Ollama API health
+  if ! docker exec ollama curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
+    log "Ollama API not responding. Restarting Ollama container..."
+    cd /opt/llm-service && docker-compose restart ollama
+    return
+  fi
+  
+  # Check LLM Service gRPC health
+  if ! grpcurl -plaintext localhost:${llmServicePort} list llm.LLMService > /dev/null 2>&1; then
+    log "LLM Service not responding. Restarting LLM Service container..."
+    cd /opt/llm-service && docker-compose restart llm-service
+    return
+  fi
+  
+  log "All services are healthy."
+}
+
+log "Starting container watchdog"
+while true; do
+  check_and_restart_services
+  sleep 60  # Check every minute
+done
+EOF`,
+        "chmod +x /opt/llm-service/watchdog.sh",
+
+        // Create a systemd service for the health check proxy
         `cat > /etc/systemd/system/health-proxy.service << 'EOF'
 [Unit]
 Description=HTTPS-to-gRPC Health Check Proxy
@@ -443,11 +629,29 @@ Nice=10
 WantedBy=multi-user.target
 EOF`,
 
-        // Enable and start the service
+        // Create a systemd service for the container watchdog
+        `cat > /etc/systemd/system/container-watchdog.service << 'EOF'
+[Unit]
+Description=Container Health Watchdog
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/opt/llm-service/watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF`,
+
+        // Enable and start the services
         `chmod +x /opt/health-proxy/https_grpc_health_proxy.py`,
         `systemctl daemon-reload`,
         `systemctl enable health-proxy`,
-        `systemctl start health-proxy`
+        `systemctl start health-proxy`,
+        `systemctl enable container-watchdog`,
+        `systemctl start container-watchdog`
       );
 
       /**
