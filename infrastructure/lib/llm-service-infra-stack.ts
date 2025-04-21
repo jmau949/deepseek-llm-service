@@ -266,11 +266,27 @@ export class LlmServiceInfraStack extends cdk.Stack {
         // Install Ollama
         "echo 'Installing Ollama...'",
         "curl -fsSL https://ollama.com/install.sh | sh",
+
+        // Create systemd service override to expose Ollama API on all interfaces
+        "mkdir -p /etc/systemd/system/ollama.service.d/",
+        `cat > /etc/systemd/system/ollama.service.d/override.conf << 'EOF'
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+EOF`,
+
+        // Start and enable Ollama service
+        "systemctl daemon-reload",
         "systemctl enable ollama",
         "systemctl start ollama",
-        "sleep 5", // Wait for Ollama to initialize
-        "echo 'Ollama installed and started. Pulling model...'",
-        // Pull the specified model to ensure it's available
+
+        // Wait for Ollama to start and verify it's running
+        "echo 'Waiting for Ollama to start...'",
+        "for i in $(seq 1 30); do if curl -s http://localhost:11434/api/version > /dev/null; then break; fi; echo 'Waiting for Ollama API...' && sleep 2; done",
+        "curl -s http://localhost:11434/api/version || (echo 'Failed to start Ollama' && exit 1)",
+        "echo 'Ollama started successfully'",
+
+        // Pull the specified model
+        "echo 'Pulling model...'",
         `ollama pull ${modelName}`,
         "echo 'Model pulled successfully'",
 
@@ -318,24 +334,18 @@ EOF`,
         `aws ecr get-login-password --region ${this.region} | docker login --username AWS --password-stdin ${this.account}.dkr.ecr.${this.region}.amazonaws.com`,
         `docker pull ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
 
-        // Run the container with environment variables for gRPC sticky sessions
-        `docker run -d --name llm-service --restart always \\
-          -p ${llmServicePort}:${llmServicePort} \\
-          -e MODEL_NAME="${modelName}" \\
-          -e OLLAMA_URL="http://host.docker.internal:11434" \\
-          -e GRPC_ENABLE_HTTP2=1 \\
-          -e GRPC_KEEPALIVE_TIME_MS=10000 \\
-          -e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \\
-          -e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \\
-          -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 \\
-          -e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \\
-          -e STICKY_SESSION_COOKIE="LlmServiceStickiness" \\
-          --add-host=host.docker.internal:host-gateway \\
-          --log-driver=awslogs \\
-          --log-opt awslogs-group=${logGroup.logGroupName} \\
-          --log-opt awslogs-region=${this.region} \\
-          --log-opt awslogs-stream={instance_id}/llm-service \\
-          ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest`,
+        // Diagnostic commands to verify Ollama is accessible
+        "echo 'Checking Ollama API accessibility...'",
+        "curl -v http://localhost:11434/api/version || echo 'Ollama API not accessible'",
+        "netstat -tuln | grep 11434 || echo 'Ollama port not found in netstat'",
+        "ss -tuln | grep 11434 || echo 'Ollama port not found in ss'",
+        "systemctl status ollama || echo 'Ollama service status check failed'",
+
+        // Enable and start the LLM service through systemd
+        "systemctl daemon-reload",
+        "systemctl enable llm-service.service",
+        "systemctl start llm-service.service",
+        "echo 'LLM service started via systemd'",
 
         // Install bare minimum health check requirements - grpcurl
         `curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl`,
@@ -494,9 +504,10 @@ Requires=docker.service ollama.service
 
 [Service]
 Restart=always
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -s http://localhost:11434/api/version && exit 0; echo "Waiting for Ollama API..." && sleep 2; done; exit 1'
 ExecStartPre=-/usr/bin/docker stop llm-service
 ExecStartPre=-/usr/bin/docker rm llm-service
-ExecStart=/usr/bin/docker start llm-service
+ExecStart=/usr/bin/docker run --name llm-service --network host -e MODEL_NAME="${modelName}" -e OLLAMA_URL="http://localhost:11434" -e GRPC_ENABLE_HTTP2=1 -e GRPC_KEEPALIVE_TIME_MS=10000 -e GRPC_KEEPALIVE_TIMEOUT_MS=5000 -e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 -e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 -e STICKY_SESSION_COOKIE="LlmServiceStickiness" --log-driver=awslogs --log-opt awslogs-group=${logGroup.logGroupName} --log-opt awslogs-region=${this.region} --log-opt awslogs-stream={instance_id}/llm-service ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest
 ExecStop=/usr/bin/docker stop llm-service
 
 [Install]
