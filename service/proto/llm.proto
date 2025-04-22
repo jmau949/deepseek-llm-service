@@ -9,6 +9,9 @@ service LLMService {
   
   // Generate a complete response without streaming (optional)
   rpc Generate (LLMRequest) returns (LLMCompleteResponse);
+
+  // Health check method used for service health verification
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
 }
 
 // Request message containing the prompt and parameters
@@ -51,4 +54,14 @@ message LLMResponse {
 message LLMCompleteResponse {
   // The complete generated text
   string text = 1;
+}
+
+// Empty request for health check
+message HealthCheckRequest {
+}
+
+// Response for health check
+message HealthCheckResponse {
+  // Service status (e.g., "SERVING")
+  string status = 1;
 }

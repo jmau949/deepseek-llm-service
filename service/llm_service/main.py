@@ -48,6 +48,16 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level (overrides config)",
     )
+    parser.add_argument(
+        "--reflection",
+        action="store_true",
+        help="Enable gRPC reflection API (overrides config)",
+    )
+    parser.add_argument(
+        "--no-reflection",
+        action="store_true",
+        help="Disable gRPC reflection API (overrides config)",
+    )
     
     args = parser.parse_args()
 
@@ -70,13 +80,18 @@ def main():
             config.model_name = args.model
         if args.log_level is not None:
             config.log_level = args.log_level
+        if args.reflection:
+            config.reflection_enabled = True
+        if args.no_reflection:
+            config.reflection_enabled = False
 
         # Log the configuration
         logger.info(
             f"Configuration: port={config.port}, "
             f"workers={config.worker_threads}, "
             f"ollama_url={config.ollama_url}, "
-            f"model={config.model_name}"
+            f"model={config.model_name}, "
+            f"reflection={config.reflection_enabled}"
         )
 
         # Start the server

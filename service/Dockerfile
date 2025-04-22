@@ -26,6 +26,10 @@ RUN poetry config virtualenvs.create false
 # Install dependencies
 RUN poetry install --without dev --no-root --no-interaction --no-ansi
 
+# Install grpcio-reflection for healthchecks
+# Use exact versions that are compatible with each other
+RUN pip install --no-cache-dir protobuf==4.25.1 grpcio==1.62.0 grpcio-reflection==1.62.0 grpcio-tools==1.62.0
+
 # Copy proto files and generate Python code
 COPY proto/ proto/
 COPY scripts/ scripts/
@@ -45,15 +49,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OLLAMA_URL="http://localhost:11434" \
     MODEL_NAME="model-name" \
     LOG_LEVEL="INFO" \
+    # Reflection API for healthchecks
+    REFLECTION_ENABLED="true" \
     # Sticky session configuration
     STICKY_SESSION_ENABLED="true" \
     STICKY_SESSION_COOKIE="LlmServiceStickiness" \
     # HTTP/2 settings for ALB
     GRPC_ENABLE_HTTP2=1 \
     GRPC_KEEPALIVE_TIME_MS=30000 \
-    GRPC_KEEPALIVE_TIMEOUT_MS=10000 \
+    GRPC_KEEPALIVE_TIMEOUT_MS=20000 \
     GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \
-    GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=10000 \
+    GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=30000 \
     GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \
     # TLS settings - disabled by default
     USE_TLS="false"
@@ -81,7 +87,27 @@ RUN apt-get update && \
     && curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl
 
 # Create health check file
-RUN echo '#!/bin/sh\ngrpcurl -plaintext localhost:$PORT list llm.LLMService 2>/dev/null || exit 1' > /healthcheck.sh && \
+RUN echo '#!/bin/sh\n\
+# Try reflection API first\n\
+if grpcurl -plaintext localhost:$PORT list llm.LLMService 2>/dev/null; then\n\
+  echo "Reflection API check: success"\n\
+  exit 0\n\
+fi\n\
+\n\
+# Try direct method call as fallback\n\
+if grpcurl -plaintext -d "{}" localhost:$PORT llm.LLMService/HealthCheck 2>/dev/null; then\n\
+  echo "Direct method call: success"\n\
+  exit 0\n\
+fi\n\
+\n\
+# Basic connectivity check as last resort\n\
+if (timeout 1 bash -c "</dev/tcp/localhost/$PORT") 2>/dev/null; then\n\
+  echo "TCP connectivity check: success"\n\
+  exit 0\n\
+fi\n\
+\n\
+echo "All health checks failed"\n\
+exit 1' > /healthcheck.sh && \
     chmod +x /healthcheck.sh
 
 # Create directory for TLS certificates

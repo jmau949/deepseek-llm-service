@@ -23,6 +23,7 @@ class Config:
     use_tls: bool = False
     tls_cert_path: Optional[str] = None
     tls_key_path: Optional[str] = None
+    reflection_enabled: bool = True
     
     # Ollama settings
     ollama_url: str = "http://localhost:11434"
@@ -128,6 +129,9 @@ class Config:
             
         if 'TLS_KEY_PATH' in os.environ:
             self.tls_key_path = os.environ['TLS_KEY_PATH']
+            
+        if 'REFLECTION_ENABLED' in os.environ:
+            self.reflection_enabled = os.environ['REFLECTION_ENABLED'].lower() in ('true', 'yes', '1')
             
         # Ollama settings
         if 'OLLAMA_URL' in os.environ:
