@@ -706,7 +706,7 @@ EOF`,
        * - Scale up to normal capacity at 9am Central Time (3pm UTC)
        */
       asg.scaleOnSchedule("ScaleDownAtMidnight", {
-        schedule: autoscaling.Schedule.cron({ hour: "6", minute: "0" }),
+        schedule: autoscaling.Schedule.cron({ hour: "5", minute: "0" }),
         minCapacity: 0,
         maxCapacity: 0,
       });

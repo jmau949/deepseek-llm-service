@@ -8,6 +8,7 @@ import time
 import logging
 import grpc
 import os
+import sys
 from concurrent import futures
 from typing import Dict, Any
 
@@ -23,6 +24,15 @@ except ImportError:
         "Protocol buffer code not found. "
         "Please run 'python scripts/generate_proto.py' first."
     )
+
+# Try to import reflection at module level to catch any import errors early
+try:
+    from grpc_reflection.v1alpha import reflection
+    REFLECTION_AVAILABLE = True
+except ImportError:
+    REFLECTION_AVAILABLE = False
+    logging.warning("grpc_reflection module not available. Reflection will be disabled.")
+    logging.warning("Install with: pip install grpcio-reflection==<same-version-as-grpcio>")
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +151,7 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
         Returns:
             Empty response
         """
+        logger.debug("Received health check request")
         return llm_pb2.HealthCheckResponse(status="SERVING")
 
     def _get_or_create_session_id(self, context):
@@ -232,51 +243,64 @@ def serve(config: Config):
     )
     
     # Add the LLM service to the server
-    llm_pb2_grpc.add_LLMServiceServicer_to_server(
-        LLMService(config), server
-    )
+    service = LLMService(config)
+    llm_pb2_grpc.add_LLMServiceServicer_to_server(service, server)
     
     # Add reflection service if enabled
     if config.reflection_enabled:
         logger.info("Enabling gRPC reflection service")
-        try:
-            # Import reflection service dynamically to avoid dependency when not used
-            from grpc_reflection.v1alpha import reflection
-            
-            # Get service names for reflection
-            service_names = [
-                llm_pb2.DESCRIPTOR.services_by_name['LLMService'].full_name,
-                reflection.SERVICE_NAME,
-            ]
-            
-            # Add reflection service to server
-            reflection.enable_server_reflection(service_names, server)
-            logger.info(f"Reflection successfully enabled for services: {', '.join(service_names)}")
-        except ImportError as e:
-            logger.error(f"Failed to import grpc_reflection: {e}")
-            logger.error("Health checks may fail if reflection is not available - install with: pip install grpcio-reflection")
-        except Exception as e:
-            logger.error(f"Failed to enable reflection: {e}")
-            logger.error(f"Exception type: {type(e).__name__}")
-            logger.error(f"Exception details: {str(e)}")
+        
+        if not REFLECTION_AVAILABLE:
+            logger.error("Cannot enable reflection: grpc_reflection module not available")
+            logger.error("Health checks that rely on reflection will fail")
+        else:
+            try:
+                # Service names for reflection
+                SERVICE_NAMES = (
+                    llm_pb2.DESCRIPTOR.services_by_name['LLMService'].full_name,
+                    reflection.SERVICE_NAME,
+                )
+                
+                # Log service descriptor information for debugging
+                logger.debug(f"Service descriptor: {llm_pb2.DESCRIPTOR}")
+                logger.debug(f"Service names: {SERVICE_NAMES}")
+                
+                # Enable reflection
+                reflection.enable_server_reflection(SERVICE_NAMES, server)
+                logger.info(f"Reflection successfully enabled for services: {', '.join(SERVICE_NAMES)}")
+            except Exception as e:
+                logger.error(f"Failed to enable reflection: {e}")
+                logger.error(f"Exception type: {type(e).__name__}")
+                logger.error(f"Exception details: {str(e)}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
     else:
         logger.warning("gRPC reflection is DISABLED - health checks may fail")
         logger.warning("To enable reflection, set REFLECTION_ENABLED=true")
     
     # Add secure or insecure port based on configuration
+    port_str = f'[::]:{config.port}'
     if config.use_tls:
         # Implementation for TLS would go here
         credentials = grpc.ssl_server_credentials([(
             open(config.tls_key_path, 'rb').read(),
             open(config.tls_cert_path, 'rb').read()
         )])
-        server.add_secure_port(f'[::]:{config.port}', credentials)
+        port = server.add_secure_port(port_str, credentials)
     else:
-        server.add_insecure_port(f'[::]:{config.port}')
+        port = server.add_insecure_port(port_str)
+    
+    # Verify port binding was successful
+    if port == 0:
+        logger.error(f"Failed to bind to port {config.port}")
+        sys.exit(1)
     
     # Start the server
     server.start()
     logger.info(f"Server started, listening on port {config.port}")
+    logger.info(f"Worker threads: {config.worker_threads}")
+    logger.info(f"Using model: {config.model_name}")
+    logger.info(f"Reflection enabled: {config.reflection_enabled}")
     
     try:
         # Keep the server running
