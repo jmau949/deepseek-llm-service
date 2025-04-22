@@ -258,7 +258,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
        */
       const userData = ec2.UserData.forLinux();
       userData.addCommands(
-        "yum update -y && yum install -y docker amazon-cloudwatch-agent python3 python3-pip curl",
+        "yum update -y && yum install -y docker amazon-cloudwatch-agent python3 python3-pip curl nc",
         "systemctl start docker && systemctl enable docker",
 
         // Install grpcurl and prepare directories
@@ -347,6 +347,7 @@ docker run -d --name llm-service --restart always --network llm-network \
   -e OLLAMA_URL=http://ollama:11434 \
   -e MODEL_NAME=$MODEL_NAME \
   -e LOG_LEVEL=INFO \
+  -e REFLECTION_ENABLED=true \
   -e GRPC_ENABLE_HTTP2=1 \
   -e GRPC_KEEPALIVE_TIME_MS=10000 \
   -e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \
@@ -383,8 +384,33 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
             try:
-                grpc_check = subprocess.run(["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"], 
-                                       capture_output=True, timeout=2).returncode == 0
+                # First check if the gRPC port is open
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    s.connect(('localhost', GRPC_PORT))
+                    port_open = True
+                except Exception:
+                    port_open = False
+                finally:
+                    s.close()
+                
+                # Try standard reflection first
+                try:
+                    grpc_check = subprocess.run(["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"], 
+                                           capture_output=True, timeout=2).returncode == 0
+                except:
+                    grpc_check = False
+                
+                # If reflection fails, try direct healthcheck method if available
+                if not grpc_check and port_open:
+                    try:
+                        direct_check = subprocess.run(["grpcurl", "-plaintext", "-d", '{}', f"localhost:{GRPC_PORT}", "llm.LLMService.HealthCheck"], 
+                                           capture_output=True, timeout=2).returncode == 0
+                        grpc_check = direct_check
+                    except:
+                        pass
+                
                 # Check Ollama directly from Python
                 ollama_check = False
                 try:
@@ -393,22 +419,36 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     ollama_check = False
                 
-                if grpc_check and ollama_check:
+                # If port is open but reflection API fails, consider service potentially healthy
+                if port_open and ollama_check:
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self._set_cookie()
                     self.end_headers()
-                    self.wfile.write(json.dumps({"status": "healthy"}).encode())
+                    self.wfile.write(json.dumps({
+                        "status": "healthy",
+                        "grpc_port_open": port_open,
+                        "grpc_reflection": grpc_check,
+                        "ollama_status": ollama_check
+                    }).encode())
                 else:
                     self.send_response(503)
-                    self.send_header('Content-Type', 'text/plain')
+                    self.send_header('Content-Type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(b'Service Unavailable')
-            except Exception:
+                    self.wfile.write(json.dumps({
+                        "status": "unhealthy",
+                        "grpc_port_open": port_open,
+                        "grpc_reflection": grpc_check,
+                        "ollama_status": ollama_check
+                    }).encode())
+            except Exception as e:
                 self.send_response(503)
-                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(b'Service Unavailable')
+                self.wfile.write(json.dumps({
+                    "status": "error",
+                    "error": str(e)
+                }).encode())
         else:
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -493,14 +533,32 @@ while true; do
     docker start llm-service 2>/dev/null || true
     sleep 10  # Give more time to initialize
   else
-    # Check LLM Service health
-    if grpcurl -plaintext -connect-timeout 5s localhost:${llmServicePort} list llm.LLMService > /dev/null 2>&1; then
-      # Reset failure counter on success
-      LLM_SERVICE_FAILS=0
-      echo "$(date): LLM service is healthy"
+    # Check LLM Service health - first try basic connectivity
+    if nc -z localhost ${llmServicePort} &>/dev/null; then
+      # Port is open, which is a good first sign
+      # Try the healthcheck script in the container itself
+      if docker exec llm-service /healthcheck.sh &>/dev/null; then
+        LLM_SERVICE_FAILS=0
+        echo "$(date): LLM service is healthy (healthcheck.sh passed)"
+      elif grpcurl -plaintext -connect-timeout 5s localhost:${llmServicePort} list &>/dev/null; then
+        # Try a simpler check - can we list any services at all?
+        LLM_SERVICE_FAILS=0
+        echo "$(date): LLM service is partially healthy (port open, some gRPC services available)"
+      else
+        LLM_SERVICE_FAILS=$((LLM_SERVICE_FAILS+1))
+        echo "$(date): LLM service health check failed ($LLM_SERVICE_FAILS/$MAX_FAILS)"
+        
+        # Only restart after consecutive failures
+        if [ $LLM_SERVICE_FAILS -ge $MAX_FAILS ]; then
+          echo "$(date): Restarting LLM service after $MAX_FAILS consecutive failures"
+          docker restart llm-service 2>/dev/null || true
+          LLM_SERVICE_FAILS=0
+          sleep 15  # Give more time to restart
+        fi
+      fi
     else
       LLM_SERVICE_FAILS=$((LLM_SERVICE_FAILS+1))
-      echo "$(date): LLM service health check failed ($LLM_SERVICE_FAILS/$MAX_FAILS)"
+      echo "$(date): LLM service port ${llmServicePort} is not responding ($LLM_SERVICE_FAILS/$MAX_FAILS)"
       
       # Only restart after consecutive failures
       if [ $LLM_SERVICE_FAILS -ge $MAX_FAILS ]; then

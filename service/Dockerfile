@@ -26,6 +26,9 @@ RUN poetry config virtualenvs.create false
 # Install dependencies
 RUN poetry install --without dev --no-root --no-interaction --no-ansi
 
+# Install grpcio-reflection for healthchecks
+RUN pip install --no-cache-dir grpcio-reflection
+
 # Copy proto files and generate Python code
 COPY proto/ proto/
 COPY scripts/ scripts/
@@ -45,6 +48,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OLLAMA_URL="http://localhost:11434" \
     MODEL_NAME="model-name" \
     LOG_LEVEL="INFO" \
+    # Reflection API for healthchecks
+    REFLECTION_ENABLED="true" \
     # Sticky session configuration
     STICKY_SESSION_ENABLED="true" \
     STICKY_SESSION_COOKIE="LlmServiceStickiness" \
@@ -81,7 +86,13 @@ RUN apt-get update && \
     && curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl
 
 # Create health check file
-RUN echo '#!/bin/sh\ngrpcurl -plaintext localhost:$PORT list llm.LLMService 2>/dev/null || exit 1' > /healthcheck.sh && \
+RUN echo '#!/bin/sh\n\
+# Try reflection API first\n\
+if grpcurl -plaintext localhost:$PORT list llm.LLMService 2>/dev/null; then\n\
+  exit 0\n\
+fi\n\
+# Try direct method call as fallback\n\
+grpcurl -plaintext -d "{}" localhost:$PORT llm.LLMService/HealthCheck 2>/dev/null || exit 1' > /healthcheck.sh && \
     chmod +x /healthcheck.sh
 
 # Create directory for TLS certificates

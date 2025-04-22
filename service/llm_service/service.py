@@ -130,6 +130,19 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
             logger.error(f"Error generating complete response: {e}")
             context.abort(grpc.StatusCode.INTERNAL, f"Error generating response: {e}")
 
+    def HealthCheck(self, request, context):
+        """
+        Simple health check method that always succeeds if the service is running.
+        
+        Args:
+            request: The empty request
+            context: The gRPC context
+            
+        Returns:
+            Empty response
+        """
+        return llm_pb2.HealthCheckResponse(status="SERVING")
+
     def _get_or_create_session_id(self, context):
         """
         Gets or creates a session ID for sticky routing.
@@ -222,6 +235,27 @@ def serve(config: Config):
     llm_pb2_grpc.add_LLMServiceServicer_to_server(
         LLMService(config), server
     )
+    
+    # Add reflection service if enabled
+    if config.reflection_enabled:
+        logger.info("Enabling gRPC reflection service")
+        try:
+            # Import reflection service dynamically to avoid dependency when not used
+            from grpc_reflection.v1alpha import reflection
+            
+            # Get service names for reflection
+            service_names = [
+                llm_pb2.DESCRIPTOR.services_by_name['LLMService'].full_name,
+                reflection.SERVICE_NAME,
+            ]
+            
+            # Add reflection service to server
+            reflection.enable_server_reflection(service_names, server)
+            logger.info(f"Reflection enabled for services: {', '.join(service_names)}")
+        except ImportError:
+            logger.error("Failed to import grpc_reflection, skipping reflection setup")
+        except Exception as e:
+            logger.error(f"Failed to enable reflection: {e}")
     
     # Add secure or insecure port based on configuration
     if config.use_tls:
