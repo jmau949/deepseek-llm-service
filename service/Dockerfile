@@ -100,12 +100,6 @@ if grpcurl -plaintext -d "{}" localhost:$PORT llm.LLMService/HealthCheck 2>/dev/
   exit 0\n\
 fi\n\
 \n\
-# Basic connectivity check as last resort\n\
-if (timeout 1 bash -c "</dev/tcp/localhost/$PORT") 2>/dev/null; then\n\
-  echo "TCP connectivity check: success"\n\
-  exit 0\n\
-fi\n\
-\n\
 echo "All health checks failed"\n\
 exit 1' > /healthcheck.sh && \
     chmod +x /healthcheck.sh
