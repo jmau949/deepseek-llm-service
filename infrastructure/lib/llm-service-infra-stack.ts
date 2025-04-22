@@ -420,7 +420,7 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
                     ollama_check = False
                 
                 # If port is open but reflection API fails, consider service potentially healthy
-                if port_open and ollama_check:
+                if port_open and (grpc_check or ollama_check):
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self._set_cookie()
@@ -540,13 +540,16 @@ while true; do
       if docker exec llm-service /healthcheck.sh &>/dev/null; then
         LLM_SERVICE_FAILS=0
         echo "$(date): LLM service is healthy (healthcheck.sh passed)"
-      elif grpcurl -plaintext -connect-timeout 5s localhost:${llmServicePort} list &>/dev/null; then
-        # Try a simpler check - can we list any services at all?
+      # Fall back to trying direct gRPC checks
+      elif grpcurl -plaintext localhost:${llmServicePort} list llm.LLMService &>/dev/null; then
         LLM_SERVICE_FAILS=0
-        echo "$(date): LLM service is partially healthy (port open, some gRPC services available)"
+        echo "$(date): LLM service reflection API is working"
+      elif grpcurl -plaintext -d "{}" localhost:${llmServicePort} llm.LLMService/HealthCheck &>/dev/null; then
+        LLM_SERVICE_FAILS=0
+        echo "$(date): LLM service direct health check succeeded"
       else
         LLM_SERVICE_FAILS=$((LLM_SERVICE_FAILS+1))
-        echo "$(date): LLM service health check failed ($LLM_SERVICE_FAILS/$MAX_FAILS)"
+        echo "$(date): LLM service health check failed ($LLM_SERVICE_FAILS/$MAX_FAILS) - port is open but service is not responding"
         
         # Only restart after consecutive failures
         if [ $LLM_SERVICE_FAILS -ge $MAX_FAILS ]; then

@@ -60,6 +60,20 @@ def main():
             # Fix imports in the generated code (needed for Python 3)
             fix_imports(output_dir, proto_file.stem)
             
+            # Verify the generated files
+            pb2_file = output_dir / f"{proto_file.stem}_pb2.py"
+            grpc_file = output_dir / f"{proto_file.stem}_pb2_grpc.py"
+            
+            if not pb2_file.exists():
+                logger.error(f"Failed to generate {pb2_file}")
+                sys.exit(1)
+                
+            if not grpc_file.exists():
+                logger.error(f"Failed to generate {grpc_file}")
+                sys.exit(1)
+                
+            logger.info(f"Generated files exist: {pb2_file.name}, {grpc_file.name}")
+                
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to generate code: {e}")
             sys.exit(1)
@@ -104,6 +118,8 @@ def fix_imports(output_dir, proto_name):
             f.write(content)
         
         logger.info(f"Fixed imports in {grpc_file}")
+    
+    logger.info(f"Verified import statements in generated files")
 
 
 if __name__ == "__main__":

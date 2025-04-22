@@ -151,8 +151,13 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
         Returns:
             Empty response
         """
-        logger.debug("Received health check request")
-        return llm_pb2.HealthCheckResponse(status="SERVING")
+        try:
+            # Log that we received a health check request
+            logger.info("Received health check request")
+            return llm_pb2.HealthCheckResponse(status="SERVING")
+        except Exception as e:
+            logger.error(f"Error in health check: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, f"Error in health check: {e}")
 
     def _get_or_create_session_id(self, context):
         """
@@ -249,31 +254,42 @@ def serve(config: Config):
     # Add reflection service if enabled
     if config.reflection_enabled:
         logger.info("Enabling gRPC reflection service")
-        
-        if not REFLECTION_AVAILABLE:
-            logger.error("Cannot enable reflection: grpc_reflection module not available")
-            logger.error("Health checks that rely on reflection will fail")
-        else:
-            try:
-                # Service names for reflection
-                SERVICE_NAMES = (
-                    llm_pb2.DESCRIPTOR.services_by_name['LLMService'].full_name,
-                    reflection.SERVICE_NAME,
-                )
-                
-                # Log service descriptor information for debugging
-                logger.debug(f"Service descriptor: {llm_pb2.DESCRIPTOR}")
-                logger.debug(f"Service names: {SERVICE_NAMES}")
-                
-                # Enable reflection
-                reflection.enable_server_reflection(SERVICE_NAMES, server)
-                logger.info(f"Reflection successfully enabled for services: {', '.join(SERVICE_NAMES)}")
-            except Exception as e:
-                logger.error(f"Failed to enable reflection: {e}")
-                logger.error(f"Exception type: {type(e).__name__}")
-                logger.error(f"Exception details: {str(e)}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
+        try:
+            # Import reflection service dynamically to avoid dependency when not used
+            from grpc_reflection.v1alpha import reflection
+            
+            # Log the services available in the DESCRIPTOR
+            logger.info(f"DESCRIPTOR services: {list(llm_pb2.DESCRIPTOR.services_by_name.keys())}")
+            
+            # Check if LLMService exists in the DESCRIPTOR
+            if 'LLMService' not in llm_pb2.DESCRIPTOR.services_by_name:
+                logger.error("ERROR: 'LLMService' not found in DESCRIPTOR services!")
+                logger.error("This indicates that the proto files might not be compiled correctly")
+                service_name = "llm.LLMService"  # Fallback using string name
+            else:
+                service = llm_pb2.DESCRIPTOR.services_by_name['LLMService']
+                logger.info(f"Service methods: {[m.name for m in service.methods]}")
+                service_name = service.full_name
+                # Check if HealthCheck exists in the service
+                has_health_check = any(m.name == 'HealthCheck' for m in service.methods)
+                logger.info(f"Has HealthCheck method: {has_health_check}")
+            
+            # Get service names for reflection
+            service_names = [
+                service_name,  # Use the service name found or fallback
+                reflection.SERVICE_NAME,
+            ]
+            
+            # Add reflection service to server
+            reflection.enable_server_reflection(service_names, server)
+            logger.info(f"Reflection successfully enabled for services: {', '.join(service_names)}")
+        except ImportError as e:
+            logger.error(f"Failed to import grpc_reflection: {e}")
+            logger.error("Health checks may fail if reflection is not available - install with: pip install grpcio-reflection")
+        except Exception as e:
+            logger.error(f"Failed to enable reflection: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Exception details: {str(e)}")
     else:
         logger.warning("gRPC reflection is DISABLED - health checks may fail")
         logger.warning("To enable reflection, set REFLECTION_ENABLED=true")

@@ -33,7 +33,11 @@ RUN pip install --no-cache-dir protobuf==4.25.1 grpcio==1.62.0 grpcio-reflection
 # Copy proto files and generate Python code
 COPY proto/ proto/
 COPY scripts/ scripts/
-RUN python scripts/generate_proto.py
+RUN python scripts/generate_proto.py && \
+    # Verify HealthCheck method exists in the generated files
+    grep -q "HealthCheck" proto/llm_pb2.py && \
+    grep -q "HealthCheck" proto/llm_pb2_grpc.py && \
+    echo "Successfully verified HealthCheck method in generated proto files"
 
 # Copy source code
 COPY llm_service/ llm_service/
@@ -88,20 +92,27 @@ RUN apt-get update && \
 
 # Create health check file
 RUN echo '#!/bin/sh\n\
-# Try reflection API first\n\
-if grpcurl -plaintext localhost:$PORT list llm.LLMService 2>/dev/null; then\n\
-  echo "Reflection API check: success"\n\
-  exit 0\n\
-fi\n\
-\n\
-# Try direct method call as fallback\n\
-if grpcurl -plaintext -d "{}" localhost:$PORT llm.LLMService/HealthCheck 2>/dev/null; then\n\
-  echo "Direct method call: success"\n\
-  exit 0\n\
-fi\n\
-\n\
-echo "All health checks failed"\n\
-exit 1' > /healthcheck.sh && \
+# First check if the port is open using built-in bash\n\
+if (timeout 1 bash -c "</dev/tcp/localhost/$PORT") 2>/dev/null; then\n\
+  echo "Port connectivity: success"\n\
+  # Try reflection check first\n\
+  if grpcurl -plaintext localhost:$PORT list llm.LLMService 2>/dev/null; then\n\
+    echo "Reflection check: success"\n\
+    exit 0\n\
+  fi\n\
+  \n\
+  # Try direct method call if reflection fails\n\
+  if grpcurl -plaintext -d "{}" localhost:$PORT llm.LLMService/HealthCheck 2>/dev/null; then\n\
+    echo "Direct method call: success"\n\
+    exit 0\n\
+  fi\n\
+  \n\
+  echo "Port is open but both reflection and direct method calls failed"\n\
+  exit 1\n\
+else\n\
+  echo "Port connectivity: failed"\n\
+  exit 1\n\
+fi' > /healthcheck.sh && \
     chmod +x /healthcheck.sh
 
 # Create directory for TLS certificates
