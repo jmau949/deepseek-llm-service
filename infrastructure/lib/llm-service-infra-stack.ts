@@ -304,11 +304,40 @@ docker network create llm-network 2>/dev/null || true
 # Start Ollama
 docker run -d --name ollama --restart always --network llm-network \
   -v ollama-data:/root/.ollama \
+  -p 11434:11434 \
   --log-driver=awslogs \
   --log-opt awslogs-group=${logGroup.logGroupName} \
   --log-opt awslogs-region=${this.region} \
   --log-opt awslogs-stream="$INSTANCE_ID/ollama" \
   ollama/ollama:latest
+
+echo "Waiting for Ollama to initialize..."
+sleep 10
+
+# Pull the model first (with retries) before starting the LLM service
+MODEL_NAME="${modelName}"
+MAX_ATTEMPTS=3
+ATTEMPT=1
+
+while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+  echo "Pulling model $MODEL_NAME (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
+  if docker exec ollama ollama pull $MODEL_NAME; then
+    echo "Model pulled successfully"
+    # Explicitly serve the model
+    echo "Starting to serve the model..."
+    docker exec -d ollama ollama serve $MODEL_NAME
+    break
+  else
+    echo "Model pull attempt $ATTEMPT failed"
+    if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+      echo "Failed to pull model after $MAX_ATTEMPTS attempts"
+    else
+      echo "Retrying in 10 seconds..."
+      sleep 10
+    fi
+    ATTEMPT=$((ATTEMPT+1))
+  fi
+done
 
 # Start LLM Service
 docker run -d --name llm-service --restart always --network llm-network \
@@ -316,7 +345,7 @@ docker run -d --name llm-service --restart always --network llm-network \
   -e PORT=${llmServicePort} \
   -e WORKER_THREADS=10 \
   -e OLLAMA_URL=http://ollama:11434 \
-  -e MODEL_NAME=${modelName} \
+  -e MODEL_NAME=$MODEL_NAME \
   -e LOG_LEVEL=INFO \
   -e GRPC_ENABLE_HTTP2=1 \
   -e GRPC_KEEPALIVE_TIME_MS=10000 \
@@ -331,9 +360,7 @@ docker run -d --name llm-service --restart always --network llm-network \
   --log-opt awslogs-stream="$INSTANCE_ID/llm-service" \
   ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest
 
-# Pull the model
-sleep 15
-(docker exec ollama ollama pull ${modelName} && echo "Model pulled successfully") || echo "Model pull failed"
+echo "Service deployment complete"
 EOF`,
         "chmod +x /opt/llm-service/start.sh",
         "cd /opt/llm-service && ./start.sh &",
@@ -413,31 +440,79 @@ EOF`,
         // Simple watchdog script
         `cat > /opt/llm-service/watchdog.sh << 'EOF'
 #!/bin/bash
+
+# Counter to track consecutive failures
+OLLAMA_FAILS=0
+LLM_SERVICE_FAILS=0
+MAX_FAILS=3
+CHECK_INTERVAL=300  # Check every 5 minutes instead of every minute
+MODEL_NAME="${modelName}"
+
 while true; do
-  # Check and restart Ollama if needed
+  # Check if Ollama container is running
   if ! docker ps | grep -q "ollama"; then
+    echo "$(date): Ollama container not running, starting it..."
     docker start ollama 2>/dev/null || true
-    sleep 5
+    sleep 10  # Give more time to initialize
+  else
+    # Check Ollama API health
+    if curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
+      # Reset failure counter on success
+      OLLAMA_FAILS=0
+      echo "$(date): Ollama is healthy"
+      
+      # Check if model is loaded and being served
+      MODEL_CHECK=$(curl -s http://localhost:11434/api/tags | grep -c "$MODEL_NAME" || echo "0")
+      if [ "$MODEL_CHECK" -eq "0" ]; then
+        echo "$(date): Model $MODEL_NAME is not loaded, serving it now..."
+        docker exec ollama ollama pull $MODEL_NAME >/dev/null 2>&1
+        docker exec -d ollama ollama serve $MODEL_NAME
+      fi
+    else
+      OLLAMA_FAILS=$((OLLAMA_FAILS+1))
+      echo "$(date): Ollama health check failed ($OLLAMA_FAILS/$MAX_FAILS)"
+      
+      # Only restart after consecutive failures
+      if [ $OLLAMA_FAILS -ge $MAX_FAILS ]; then
+        echo "$(date): Restarting Ollama after $MAX_FAILS consecutive failures"
+        docker restart ollama 2>/dev/null || true
+        OLLAMA_FAILS=0
+        sleep 15  # Give more time to restart
+        
+        # Make sure model is loaded after restart
+        echo "$(date): Ensuring model is loaded after restart..."
+        docker exec ollama ollama pull $MODEL_NAME >/dev/null 2>&1
+        docker exec -d ollama ollama serve $MODEL_NAME
+      fi
+    fi
   fi
   
-  # Check and restart LLM service if needed
+  # Check if LLM service container is running
   if ! docker ps | grep -q "llm-service"; then
+    echo "$(date): LLM service container not running, starting it..."
     docker start llm-service 2>/dev/null || true
-    sleep 5
+    sleep 10  # Give more time to initialize
+  else
+    # Check LLM Service health
+    if grpcurl -plaintext -connect-timeout 5s localhost:${llmServicePort} list llm.LLMService > /dev/null 2>&1; then
+      # Reset failure counter on success
+      LLM_SERVICE_FAILS=0
+      echo "$(date): LLM service is healthy"
+    else
+      LLM_SERVICE_FAILS=$((LLM_SERVICE_FAILS+1))
+      echo "$(date): LLM service health check failed ($LLM_SERVICE_FAILS/$MAX_FAILS)"
+      
+      # Only restart after consecutive failures
+      if [ $LLM_SERVICE_FAILS -ge $MAX_FAILS ]; then
+        echo "$(date): Restarting LLM service after $MAX_FAILS consecutive failures"
+        docker restart llm-service 2>/dev/null || true
+        LLM_SERVICE_FAILS=0
+        sleep 15  # Give more time to restart
+      fi
+    fi
   fi
   
-  # Check Ollama API directly from host
-  if ! curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
-    docker restart ollama 2>/dev/null || true
-    sleep 5
-  fi
-  
-  # Check LLM Service
-  if ! grpcurl -plaintext localhost:${llmServicePort} list llm.LLMService > /dev/null 2>&1; then
-    docker restart llm-service 2>/dev/null || true
-  fi
-  
-  sleep 60
+  sleep $CHECK_INTERVAL
 done
 EOF`,
         "chmod +x /opt/llm-service/watchdog.sh",
