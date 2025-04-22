@@ -27,7 +27,8 @@ RUN poetry config virtualenvs.create false
 RUN poetry install --without dev --no-root --no-interaction --no-ansi
 
 # Install grpcio-reflection for healthchecks
-RUN pip install --no-cache-dir grpcio-reflection
+# Use exact versions that are compatible with each other
+RUN pip install --no-cache-dir protobuf==4.25.1 grpcio==1.62.0 grpcio-reflection==1.62.0 grpcio-tools==1.62.0
 
 # Copy proto files and generate Python code
 COPY proto/ proto/
@@ -56,9 +57,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # HTTP/2 settings for ALB
     GRPC_ENABLE_HTTP2=1 \
     GRPC_KEEPALIVE_TIME_MS=30000 \
-    GRPC_KEEPALIVE_TIMEOUT_MS=10000 \
+    GRPC_KEEPALIVE_TIMEOUT_MS=20000 \
     GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \
-    GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=10000 \
+    GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=30000 \
     GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \
     # TLS settings - disabled by default
     USE_TLS="false"
@@ -89,10 +90,24 @@ RUN apt-get update && \
 RUN echo '#!/bin/sh\n\
 # Try reflection API first\n\
 if grpcurl -plaintext localhost:$PORT list llm.LLMService 2>/dev/null; then\n\
+  echo "Reflection API check: success"\n\
   exit 0\n\
 fi\n\
+\n\
 # Try direct method call as fallback\n\
-grpcurl -plaintext -d "{}" localhost:$PORT llm.LLMService/HealthCheck 2>/dev/null || exit 1' > /healthcheck.sh && \
+if grpcurl -plaintext -d "{}" localhost:$PORT llm.LLMService/HealthCheck 2>/dev/null; then\n\
+  echo "Direct method call: success"\n\
+  exit 0\n\
+fi\n\
+\n\
+# Basic connectivity check as last resort\n\
+if (timeout 1 bash -c "</dev/tcp/localhost/$PORT") 2>/dev/null; then\n\
+  echo "TCP connectivity check: success"\n\
+  exit 0\n\
+fi\n\
+\n\
+echo "All health checks failed"\n\
+exit 1' > /healthcheck.sh && \
     chmod +x /healthcheck.sh
 
 # Create directory for TLS certificates

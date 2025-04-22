@@ -258,7 +258,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
        */
       const userData = ec2.UserData.forLinux();
       userData.addCommands(
-        "yum update -y && yum install -y docker amazon-cloudwatch-agent python3 python3-pip curl nc",
+        "yum update -y && yum install -y docker amazon-cloudwatch-agent python3 python3-pip curl nc netcat",
         "systemctl start docker && systemctl enable docker",
 
         // Install grpcurl and prepare directories
@@ -349,10 +349,10 @@ docker run -d --name llm-service --restart always --network llm-network \
   -e LOG_LEVEL=INFO \
   -e REFLECTION_ENABLED=true \
   -e GRPC_ENABLE_HTTP2=1 \
-  -e GRPC_KEEPALIVE_TIME_MS=10000 \
-  -e GRPC_KEEPALIVE_TIMEOUT_MS=5000 \
+  -e GRPC_KEEPALIVE_TIME_MS=30000 \
+  -e GRPC_KEEPALIVE_TIMEOUT_MS=20000 \
   -e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \
-  -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=5000 \
+  -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=30000 \
   -e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \
   -e STICKY_SESSION_COOKIE=LlmServiceStickiness \
   --log-driver=awslogs \

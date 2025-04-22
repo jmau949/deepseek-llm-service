@@ -251,11 +251,17 @@ def serve(config: Config):
             
             # Add reflection service to server
             reflection.enable_server_reflection(service_names, server)
-            logger.info(f"Reflection enabled for services: {', '.join(service_names)}")
-        except ImportError:
-            logger.error("Failed to import grpc_reflection, skipping reflection setup")
+            logger.info(f"Reflection successfully enabled for services: {', '.join(service_names)}")
+        except ImportError as e:
+            logger.error(f"Failed to import grpc_reflection: {e}")
+            logger.error("Health checks may fail if reflection is not available - install with: pip install grpcio-reflection")
         except Exception as e:
             logger.error(f"Failed to enable reflection: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Exception details: {str(e)}")
+    else:
+        logger.warning("gRPC reflection is DISABLED - health checks may fail")
+        logger.warning("To enable reflection, set REFLECTION_ENABLED=true")
     
     # Add secure or insecure port based on configuration
     if config.use_tls:
