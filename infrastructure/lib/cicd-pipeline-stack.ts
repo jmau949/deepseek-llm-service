@@ -111,11 +111,7 @@ export class CicdPipelineStack extends cdk.Stack {
                 "echo Commit hash: $COMMIT_HASH",
                 "# Create semantic version-like tag",
                 "BUILD_DATE=$(date +%Y%m%d%H%M)",
-                'if [ "$BRANCH_NAME" = "master" ] || [ "$BRANCH_NAME" = "main" ]; then',
-                '  IMAGE_TAG="0.1.0-$COMMIT_HASH"',
-                "else",
-                '  IMAGE_TAG="0.1.0-$BRANCH_NAME-$COMMIT_HASH"',
-                "fi",
+                'IMAGE_TAG="0.1.0-$([ "$BRANCH_NAME" = "master" ] || [ "$BRANCH_NAME" = "main" ] && echo "$COMMIT_HASH" || echo "$BRANCH_NAME-$COMMIT_HASH")"',
                 'LATEST_TAG="latest"',
                 "echo Image will be tagged as: $IMAGE_TAG and $LATEST_TAG",
                 "echo Repository structure for debugging:",
@@ -130,69 +126,50 @@ export class CicdPipelineStack extends cdk.Stack {
                 "echo Current directory: $(pwd)",
                 "echo Repository root contents:",
                 "ls -la",
-                "# Function to modify Dockerfile to use ECR cache",
-                "modify_dockerfile() {",
-                '  if [ -f "$1" ]; then',
-                '    echo "Modifying Dockerfile at $1 to use ECR cache..."',
-                '    sed -i.bak "s|FROM python:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/python:|g" "$1"',
-                '    sed -i.bak "s|FROM node:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/node:|g" "$1"',
-                '    sed -i.bak "s|FROM ubuntu:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/ubuntu:|g" "$1"',
-                '    echo "Modified Dockerfile:"',
-                '    cat "$1"',
-                "  fi",
-                "}",
-                "if [ -f ./service/Dockerfile ]; then",
-                "  echo 'Dockerfile found in service directory'",
-                "  cd service",
-                "  echo 'Changed to service directory: '$(pwd)",
-                "  ls -la",
-                "  modify_dockerfile Dockerfile",
-                "  echo 'Building Docker image...'",
-                "  docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .",
-                "  docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG",
-                "elif [ -f Dockerfile ]; then",
-                "  echo 'Dockerfile found in root directory'",
-                "  modify_dockerfile Dockerfile",
-                "  echo 'Building Docker image...'",
-                "  docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .",
-                "  docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG",
-                "else",
-                "  echo 'ERROR: Dockerfile not found in expected locations!'",
-                "  find . -name 'Dockerfile' -type f",
-                "  exit 1",
-                "fi",
+                "# Modify Dockerfile to use ECR cache (function inline)",
+                'modify_dockerfile() { if [ -f "$1" ]; then echo "Modifying Dockerfile at $1 to use ECR cache..."; sed -i.bak "s|FROM python:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/python:|g" "$1"; sed -i.bak "s|FROM node:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/node:|g" "$1"; sed -i.bak "s|FROM ubuntu:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/ubuntu:|g" "$1"; echo "Modified Dockerfile:"; cat "$1"; fi; }',
+                "# Build Docker image based on Dockerfile location",
+                "if [ -f ./service/Dockerfile ]; then echo 'Dockerfile found in service directory'; cd service; echo 'Changed to service directory: '$(pwd); ls -la; modify_dockerfile Dockerfile; echo 'Building Docker image...'; docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .; docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG; elif [ -f Dockerfile ]; then echo 'Dockerfile found in root directory'; modify_dockerfile Dockerfile; echo 'Building Docker image...'; docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .; docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG; else echo 'ERROR: Dockerfile not found in expected locations!'; find . -name 'Dockerfile' -type f; exit 1; fi",
                 "echo 'Successfully built Docker image with tags: $IMAGE_TAG and $LATEST_TAG'",
               ],
             },
             post_build: {
               commands: [
                 "echo Build completed on `date`",
-                "if [ $CODEBUILD_BUILD_SUCCEEDING = 1 ]; then",
-                "  echo Pushing the Docker image...",
-                "  echo Docker images available:",
-                "  docker images",
-                "  # Push the specific version tag",
-                "  docker push $ECR_REPOSITORY_URI:$IMAGE_TAG",
-                "  # Push the latest tag",
-                "  docker push $ECR_REPOSITORY_URI:$LATEST_TAG",
-                "  echo Successfully pushed Docker image with tags: $IMAGE_TAG and $LATEST_TAG",
-                "  echo Writing image definition file...",
-                "  cd $CODEBUILD_SRC_DIR",
-                "  echo '{\"ImageURI\":\"'$ECR_REPOSITORY_URI:$IMAGE_TAG'\"}' > imageDefinition.json",
-                "  echo Image definition file created:",
-                "  cat imageDefinition.json",
-                "  # Create GitHub release for master branch",
-                '  if [ "$BRANCH_NAME" = "master" ] || [ "$BRANCH_NAME" = "main" ]; then',
-                "    echo Creating GitHub release for commit $COMMIT_HASH",
-                "    pip3 install --user PyGithub",
-                '    GITHUB_TOKEN=$(aws secretsmanager get-secret-value --secret-id deepseek-llm-service-pat --query SecretString --output text | jq -r ."github-token")',
-                "    python3 -c \"import os; import time; from github import Github; from datetime import datetime; gh_token = os.environ['GITHUB_TOKEN']; commit_hash = os.environ['COMMIT_HASH']; image_tag = os.environ['IMAGE_TAG']; g = Github(gh_token); repo = g.get_repo('jmau949/deepseek-llm-service'); commit = repo.get_commit(os.environ['CODEBUILD_RESOLVED_SOURCE_VERSION']); message = commit.commit.message; date_str = datetime.now().strftime('%Y-%m-%d'); release_name = f'Release {image_tag} ({date_str})'; try: repo.create_git_release(tag=image_tag, name=release_name, message=f'Automatic release for commit {commit_hash}\\\\n\\\\nCommit message: {message}\\\\n\\\\nDocker image: {os.environ[\\\"ECR_REPOSITORY_URI\\\"]}:{image_tag}', target_commitish=os.environ['CODEBUILD_RESOLVED_SOURCE_VERSION'], draft=False, prerelease=False); print(f'Successfully created GitHub release: {release_name}'); except Exception as e: print(f'Error creating GitHub release: {str(e)}'); # Don't fail the build for release creation issues\"",
-                "  fi",
-                "else",
-                "  echo Build failed, skipping Docker push",
-                "  cd $CODEBUILD_SRC_DIR",
-                "  echo '{\"ImageURI\":\"'$ECR_REPOSITORY_URI:$LATEST_TAG'\"}' > imageDefinition.json",
-                "fi",
+                "# Handle build success or failure",
+                "if [ $CODEBUILD_BUILD_SUCCEEDING = 1 ]; then echo Pushing the Docker image...; echo Docker images available:; docker images; docker push $ECR_REPOSITORY_URI:$IMAGE_TAG; docker push $ECR_REPOSITORY_URI:$LATEST_TAG; echo Successfully pushed Docker image with tags: $IMAGE_TAG and $LATEST_TAG; echo Writing image definition file...; cd $CODEBUILD_SRC_DIR; echo '{\"ImageURI\":\"'$ECR_REPOSITORY_URI:$IMAGE_TAG'\"}' > imageDefinition.json; echo Image definition file created:; cat imageDefinition.json; if [ \"$BRANCH_NAME\" = \"master\" ] || [ \"$BRANCH_NAME\" = \"main\" ]; then echo Creating GitHub release for commit $COMMIT_HASH; pip3 install --user PyGithub; GITHUB_TOKEN=$(aws secretsmanager get-secret-value --secret-id deepseek-llm-service-pat --query SecretString --output text | jq -r '.\"github-token\"'); echo \"Got GitHub token\"; export GITHUB_TOKEN=\"$GITHUB_TOKEN\"; export COMMIT_HASH=\"$COMMIT_HASH\"; export IMAGE_TAG=\"$IMAGE_TAG\"; export ECR_REPOSITORY_URI=\"$ECR_REPOSITORY_URI\"; export CODEBUILD_RESOLVED_SOURCE_VERSION=\"$CODEBUILD_RESOLVED_SOURCE_VERSION\"; cat > create_release.py << 'EOL'
+import os
+import time
+from github import Github
+from datetime import datetime
+
+gh_token = os.environ[\"GITHUB_TOKEN\"]
+commit_hash = os.environ[\"COMMIT_HASH\"]
+image_tag = os.environ[\"IMAGE_TAG\"]
+ecr_uri = os.environ[\"ECR_REPOSITORY_URI\"]
+commit_id = os.environ[\"CODEBUILD_RESOLVED_SOURCE_VERSION\"]
+
+g = Github(gh_token)
+repo = g.get_repo(\"jmau949/deepseek-llm-service\")
+commit = repo.get_commit(commit_id)
+message = commit.commit.message
+date_str = datetime.now().strftime(\"%Y-%m-%d\")
+release_name = f\"Release {image_tag} ({date_str})\"
+
+try:
+    repo.create_git_release(
+        tag=image_tag,
+        name=release_name,
+        message=f\"Automatic release for commit {commit_hash}\\n\\nCommit message: {message}\\n\\nDocker image: {ecr_uri}:{image_tag}\",
+        target_commitish=commit_id,
+        draft=False,
+        prerelease=False
+    )
+    print(f\"Successfully created GitHub release: {release_name}\")
+except Exception as e:
+    print(f\"Error creating GitHub release: {str(e)}\")
+EOL
+python3 create_release.py; fi; else echo Build failed, skipping Docker push; cd $CODEBUILD_SRC_DIR; echo '{\"ImageURI\":\"'$ECR_REPOSITORY_URI:$LATEST_TAG'\"}' > imageDefinition.json; fi',
               ],
             },
           },
