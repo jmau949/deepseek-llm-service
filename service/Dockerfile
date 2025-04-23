@@ -75,6 +75,7 @@ COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/pytho
 COPY --from=builder /build/proto/*.py /app/proto/
 COPY --from=builder /build/llm_service /app/llm_service
 COPY --from=builder /build/scripts /app/scripts
+COPY proto/*.proto proto/
 
 # Create an empty __init__.py in the proto directory
 RUN mkdir -p /app/proto && touch /app/proto/__init__.py
@@ -126,6 +127,13 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD /healt
 
 # Set Python path
 ENV PYTHONPATH=/app
+
+# Regenerate proto files from source proto files
+RUN cd /app && python -m scripts.generate_proto && \
+    # Verify HealthCheck method exists
+    grep -q "HealthCheck" /app/proto/llm_pb2.py && \
+    grep -q "HealthCheck" /app/proto/llm_pb2_grpc.py && \
+    echo "Successfully verified proto files include HealthCheck method"
 
 # Run the service
 CMD ["python", "-m", "llm_service.main"]

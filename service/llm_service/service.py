@@ -154,7 +154,13 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
         try:
             # Log that we received a health check request
             logger.info("Received health check request")
-            return llm_pb2.HealthCheckResponse(status="SERVING")
+            # Log detailed info about the service status for debugging
+            logger.info(f"Service status - model: {self.config.model_name}, ollama_url: {self.config.ollama_url}")
+            
+            # Create and return HealthCheckResponse
+            response = llm_pb2.HealthCheckResponse(status="SERVING")
+            logger.info(f"Health check response: {response}")
+            return response
         except Exception as e:
             logger.error(f"Error in health check: {e}")
             context.abort(grpc.StatusCode.INTERNAL, f"Error in health check: {e}")
