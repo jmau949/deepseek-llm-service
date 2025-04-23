@@ -75,8 +75,7 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
         Yields:
             LLMResponse chunks as they are generated
         """
-        logger.info(f"Received streaming request with prompt: {request.prompt[:100]}...")
-
+        logger.info(f"Received streaming request with prompt: {request.prompt[:50]}...")
         
         try:
             # Extract or create session ID for sticky sessions
