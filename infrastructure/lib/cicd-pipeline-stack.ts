@@ -19,6 +19,7 @@ export class CicdPipelineStack extends cdk.Stack {
         upstreamRegistryUrl: "registry-1.docker.io",
       }
     );
+    console.log("dockerHubCache", dockerHubCache);
 
     // Use existing ECR repository
     const ecrRepository = ecr.Repository.fromRepositoryName(
