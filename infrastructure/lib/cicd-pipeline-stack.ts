@@ -201,6 +201,7 @@ export class CicdPipelineStack extends cdk.Stack {
 
     // Grant permissions to the CodeBuild project to push to ECR
     ecrRepository.grantPullPush(buildProject);
+    console.log("dummy rebuild");
 
     // Grant permissions to access the GitHub token in Secrets Manager
     buildProject.addToRolePolicy(
