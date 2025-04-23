@@ -4,11 +4,36 @@ import * as codepipeline from "aws-cdk-lib/aws-codepipeline";
 import * as codepipeline_actions from "aws-cdk-lib/aws-codepipeline-actions";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as aws_secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { Construct } from "constructs";
 
 export class CicdPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+
+    // First create a secret with the correct naming convention for ECR pull-through cache
+    // Import the existing Docker Hub credentials secret
+    const existingDockerHubSecret = aws_secretsmanager.Secret.fromSecretNameV2(
+      this,
+      "ExistingDockerHubSecret",
+      "docker-hub-credentials" // Use the secret name, not the ARN
+    );
+
+    // Create a new secret with the required naming convention for ECR pull-through cache
+    const dockerHubEcrSecret = new aws_secretsmanager.CfnSecret(
+      this,
+      "DockerHubEcrSecret",
+      {
+        name: "ecr-pullthroughcache/dockerhub",
+        description: "Docker Hub credentials for ECR pull-through cache",
+        secretString: JSON.stringify({
+          username:
+            "{{resolve:secretsmanager:docker-hub-credentials:SecretString:username}}",
+          accessToken:
+            "{{resolve:secretsmanager:docker-hub-credentials:SecretString:password}}",
+        }),
+      }
+    );
 
     // Create ECR pull-through cache for Docker Hub to avoid rate limiting
     const dockerHubCache = new ecr.CfnPullThroughCacheRule(
@@ -17,6 +42,7 @@ export class CicdPipelineStack extends cdk.Stack {
       {
         ecrRepositoryPrefix: "docker-hub",
         upstreamRegistryUrl: "registry-1.docker.io",
+        credentialArn: dockerHubEcrSecret.ref,
       }
     );
     console.log("dockerHubCache", dockerHubCache);

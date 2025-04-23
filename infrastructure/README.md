@@ -113,7 +113,7 @@ The LLM Service Infrastructure Stack deploys the GPU instances that run the LLM 
 ### Deployment Order
 1. Deploy the VPC Infrastructure Stack first:
    ```bash
-   npx cdk deploy VpcInfrastructureStack
+   npx cdk deploy LlmServiceCicdPipelineStack
    ```
 
 2. Then deploy the LLM Service Infrastructure Stack:
