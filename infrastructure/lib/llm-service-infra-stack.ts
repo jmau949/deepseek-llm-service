@@ -669,8 +669,8 @@ EOF`,
         vpc,
         vpcSubnets: subnetSelection,
         launchTemplate,
-        minCapacity: 1,
-        maxCapacity: 1, // Increased to allow for scale out during high demand
+        minCapacity: 0,
+        maxCapacity: 0, // Increased to allow for scale out during high demand
         instanceMonitoring: autoscaling.Monitoring.BASIC, // Basic monitoring to save costs
         updatePolicy: autoscaling.UpdatePolicy.rollingUpdate({
           maxBatchSize: 1,
@@ -716,8 +716,8 @@ EOF`,
 
       asg.scaleOnSchedule("ScaleUpAtNineAM", {
         schedule: autoscaling.Schedule.cron({ hour: "15", minute: "0" }),
-        minCapacity: 1,
-        maxCapacity: 1,
+        minCapacity: 0,
+        maxCapacity: 0,
       });
 
       /**
