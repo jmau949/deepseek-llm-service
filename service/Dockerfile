@@ -75,7 +75,7 @@ COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/pytho
 COPY --from=builder /build/proto/*.py /app/proto/
 COPY --from=builder /build/llm_service /app/llm_service
 COPY --from=builder /build/scripts /app/scripts
-COPY proto/*.proto proto/
+COPY --from=builder /build/proto/*.proto /app/proto/
 
 # Create an empty __init__.py in the proto directory
 RUN mkdir -p /app/proto && touch /app/proto/__init__.py
