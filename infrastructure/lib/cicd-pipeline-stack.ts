@@ -87,6 +87,11 @@ export class CicdPipelineStack extends cdk.Stack {
               commands: [
                 "echo Logging in to Amazon ECR...",
                 "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com",
+                "# Make sure the ECR credentials are properly configured",
+                "# Ensure we have proper AWS credentials by checking the caller identity",
+                "aws sts get-caller-identity",
+                "# Refresh ECR login to ensure it's valid",
+                "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com",
                 "# Make sure the ECR pull-through cache is properly configured",
                 "echo 'Configuring Docker to use ECR pull-through cache...'",
                 "mkdir -p $HOME/.docker",
@@ -133,67 +138,27 @@ export class CicdPipelineStack extends cdk.Stack {
                 "echo Current directory: $(pwd)",
                 "echo Repository root contents:",
                 "ls -la",
+                "# Verify Docker login is working",
+                "docker info",
+                "# Re-authenticate with ECR",
+                "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com",
                 "# Define function to modify Dockerfile to use ECR cache",
                 'modify_dockerfile() { if [ -f "$1" ]; then echo "Modifying Dockerfile at $1 to use ECR cache..."; sed -i.bak "s|FROM python:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/python:|g" "$1"; sed -i.bak "s|FROM node:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/node:|g" "$1"; sed -i.bak "s|FROM ubuntu:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/ubuntu:|g" "$1"; sed -i.bak "s|FROM busybox:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/busybox:|g" "$1"; echo "Modified Dockerfile:"; cat "$1"; fi; }',
-                "# Build Docker image based on Dockerfile location",
-                "if [ -f ./service/Dockerfile ]; then",
-                "  echo 'Dockerfile found in service directory'",
-                "  cd service",
-                "  echo 'Changed to service directory: '$(pwd)",
-                "  ls -la",
-                "  modify_dockerfile Dockerfile",
-                "  echo 'Building Docker image with --no-cache option to avoid rate limit issues...'",
-                "  docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .",
-                "  docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG",
-                "elif [ -f Dockerfile ]; then",
-                "  echo 'Dockerfile found in root directory'",
-                "  modify_dockerfile Dockerfile",
-                "  echo 'Building Docker image with --no-cache option to avoid rate limit issues...'",
-                "  docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .",
-                "  docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG",
-                "else",
-                "  echo 'ERROR: Dockerfile not found in expected locations!'",
-                "  find . -name 'Dockerfile' -type f",
-                "  exit 1",
-                "fi",
-                "echo 'Successfully built Docker image with tags: $IMAGE_TAG and $LATEST_TAG'",
+                // Replace the multi-line if statement with a single command:
+                'bash -c \'if [ -f ./service/Dockerfile ]; then echo "Dockerfile found in service directory"; cd service; echo "Changed to service directory: $(pwd)"; ls -la; modify_dockerfile Dockerfile; echo "Building Docker image with --no-cache option to avoid rate limit issues..."; docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .; docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG; elif [ -f Dockerfile ]; then echo "Dockerfile found in root directory"; modify_dockerfile Dockerfile; echo "Building Docker image with --no-cache option to avoid rate limit issues..."; docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .; docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG; else echo "ERROR: Dockerfile not found in expected locations!"; find . -name "Dockerfile" -type f; exit 1; fi\'',
               ],
             },
             post_build: {
               commands: [
                 "echo Build completed on `date`",
-                "# Handle build success or failure",
-                "if [ $CODEBUILD_BUILD_SUCCEEDING = 1 ]; then",
-                '  echo "Pushing the Docker image..."',
-                '  echo "Docker images available:"',
-                "  docker images",
-                '  echo "DEBUG: Repository URI is $ECR_REPOSITORY_URI"',
-                '  echo "DEBUG: Image tag is $IMAGE_TAG"',
-                '  echo "DEBUG: Latest tag is $LATEST_TAG"',
-                '  echo "Executing docker push $ECR_REPOSITORY_URI:$IMAGE_TAG"',
-                '  docker push $ECR_REPOSITORY_URI:$IMAGE_TAG || { echo "ERROR: Failed to push $ECR_REPOSITORY_URI:$IMAGE_TAG"; exit 1; }',
-                '  echo "Executing docker push $ECR_REPOSITORY_URI:$LATEST_TAG"',
-                '  docker push $ECR_REPOSITORY_URI:$LATEST_TAG || { echo "ERROR: Failed to push $ECR_REPOSITORY_URI:$LATEST_TAG"; exit 1; }',
-                '  echo "Successfully pushed Docker image with tags: $IMAGE_TAG and $LATEST_TAG"',
-                '  echo "Writing image definition file..."',
-                "  cd $CODEBUILD_SRC_DIR",
-                "  echo '{\"ImageURI\":\"'$ECR_REPOSITORY_URI:$IMAGE_TAG'\"}' > imageDefinition.json",
-                '  echo "Image definition file created:"',
-                "  cat imageDefinition.json",
-                '  if [ "$BRANCH_NAME" = "master" ] || [ "$BRANCH_NAME" = "main" ]; then',
-                '    echo "Creating GitHub release for commit $COMMIT_HASH"',
-                '    echo "GitHub release creation will be implemented in a future update"',
-                "  fi",
-                "else",
-                '  echo "Build failed, skipping Docker push"',
-                "  cd $CODEBUILD_SRC_DIR",
-                "  echo '{\"ImageURI\":\"'$ECR_REPOSITORY_URI:$LATEST_TAG'\"}' > imageDefinition.json",
-                "fi",
+                'bash -c \'if [ $CODEBUILD_BUILD_SUCCEEDING = 1 ]; then echo "Pushing the Docker image..."; echo "Docker images available:"; docker images; echo "DEBUG: Repository URI is $ECR_REPOSITORY_URI"; echo "DEBUG: Image tag is $IMAGE_TAG"; echo "DEBUG: Latest tag is $LATEST_TAG"; echo "Refreshing ECR login credentials..."; aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com; aws sts get-caller-identity; echo "Executing docker push $ECR_REPOSITORY_URI:$IMAGE_TAG"; docker push $ECR_REPOSITORY_URI:$IMAGE_TAG || { echo "ERROR: Failed to push $ECR_REPOSITORY_URI:$IMAGE_TAG"; exit 1; }; echo "Executing docker push $ECR_REPOSITORY_URI:$LATEST_TAG"; docker push $ECR_REPOSITORY_URI:$LATEST_TAG || { echo "ERROR: Failed to push $ECR_REPOSITORY_URI:$LATEST_TAG"; exit 1; }; echo "Successfully pushed Docker image with tags: $IMAGE_TAG and $LATEST_TAG"; echo "Writing image definition file..."; cd $CODEBUILD_SRC_DIR; echo "{\\"ImageURI\\":\\"$ECR_REPOSITORY_URI:$IMAGE_TAG\\"}" > imageDefinition.json; echo "Image definition file created:"; cat imageDefinition.json; if [ "$BRANCH_NAME" = "master" ] || [ "$BRANCH_NAME" = "main" ]; then echo "Creating GitHub release for commit $COMMIT_HASH"; echo "GitHub release creation will be implemented in a future update"; fi; else echo "Build failed, skipping Docker push"; exit 1; fi\'',
               ],
             },
           },
           artifacts: {
             files: ["imageDefinition.json"],
+            "base-directory": "$CODEBUILD_SRC_DIR",
+            "discard-paths": "no",
           },
         }),
       }
@@ -201,6 +166,25 @@ export class CicdPipelineStack extends cdk.Stack {
 
     // Grant permissions to the CodeBuild project to push to ECR
     ecrRepository.grantPullPush(buildProject);
+
+    // Add explicit ECR permissions to ensure authentication works
+    buildProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage",
+        ],
+        resources: ["*"],
+      })
+    );
+
     console.log("dummy rebuild");
 
     // Grant permissions to access the GitHub token in Secrets Manager
