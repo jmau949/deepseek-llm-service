@@ -75,6 +75,7 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
         Yields:
             LLMResponse chunks as they are generated
         """
+        logger.info('generating stream')
         logger.info(f"Received streaming request with prompt: {request.prompt[:50]}...")
         
         try:
@@ -256,6 +257,7 @@ def serve(config: Config):
     # Add the LLM service to the server
     service = LLMService(config)
     llm_pb2_grpc.add_LLMServiceServicer_to_server(service, server)
+    logger.info('serving')
     
     # Add reflection service if enabled
     if config.reflection_enabled:
