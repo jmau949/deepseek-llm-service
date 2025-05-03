@@ -4,9 +4,13 @@ import * as autoscaling from "aws-cdk-lib/aws-autoscaling";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as elasticloadbalancingv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import { Construct } from "constructs";
+import * as fs from "fs";
+import * as path from "path";
 
 /**
  * Properties for the LLM Service Infrastructure Stack
@@ -192,12 +196,47 @@ export class LlmServiceInfraStack extends cdk.Stack {
       );
 
       /**
+       * Create Log Group for Instance Logs
+       *
+       * Set up a CloudWatch Log Group for container and instance logs
+       * with appropriate retention period
+       */
+      const logGroup = new logs.LogGroup(this, "LlmServiceLogGroup", {
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY, // Automatically delete logs when stack is deleted
+      });
+
+      /**
+       * Scripts S3 Bucket
+       *
+       * Creating an S3 bucket to store instance scripts since they exceed
+       * the 16KB user data limit
+       */
+      const scriptsBucket = new s3.Bucket(this, "LlmServiceScriptsBucket", {
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        autoDeleteObjects: true,
+        encryption: s3.BucketEncryption.S3_MANAGED,
+        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+        enforceSSL: true,
+      });
+
+      // Get script content from files
+      const scriptsPath = path.join(__dirname, "..", "scripts");
+
+      // Deploy the scripts to S3 bucket
+      new s3deploy.BucketDeployment(this, "DeployScripts", {
+        sources: [s3deploy.Source.asset(scriptsPath)],
+        destinationBucket: scriptsBucket,
+      });
+
+      /**
        * EC2 Instance Role
        *
        * Create an IAM role for the EC2 instances with least privilege permissions:
        * - Pull container images from ECR
        * - Allow SSM Session Manager access (for debugging)
        * - CloudWatch Logs access for logging
+       * - Allow access to S3 bucket for scripts
        */
       const instanceRole = new iam.Role(this, "LlmServiceInstanceRole", {
         assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
@@ -236,25 +275,47 @@ export class LlmServiceInfraStack extends cdk.Stack {
         })
       );
 
-      /**
-       * Create Log Group for Instance Logs
-       *
-       * Set up a CloudWatch Log Group for container and instance logs
-       * with appropriate retention period
-       */
-      const logGroup = new logs.LogGroup(this, "LlmServiceLogGroup", {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY, // Automatically delete logs when stack is deleted
-      });
+      // Add permissions to access S3 bucket for scripts
+      instanceRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ["s3:GetObject", "s3:ListBucket"],
+          resources: [scriptsBucket.bucketArn, `${scriptsBucket.bucketArn}/*`],
+        })
+      );
+
+      // Service definitions - these are small enough to be included in user data
+      const healthProxyService = `[Unit]
+Description=HTTP/2 Health Check Proxy
+After=docker.service network.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash -c "pip3 install -U h2 hyper requests"
+ExecStart=/usr/bin/python3 /opt/health-proxy/health.py ${llmServicePort}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target`;
+
+      const containerWatchdogService = `[Unit]
+Description=Container Watchdog
+After=docker.service
+Requires=docker.service
+
+[Service]
+Environment="MODEL_NAME=${modelName}"
+Environment="PORT=${llmServicePort}"
+ExecStart=/opt/llm-service/watchdog.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target`;
 
       /**
-       * EC2 User Data
-       *
-       * Define the startup script that will:
-       * 1. Install Docker and necessary dependencies
-       * 2. Pull the LLM service container
-       * 3. Run the container with the correct configuration
-       * 4. Set up an HTTPS health check proxy for the ALB
+       * EC2 User Data - streamlined version that downloads scripts from S3
+       * and passes environment variables to them
        */
       const userData = ec2.UserData.forLinux();
       userData.addCommands(
@@ -262,7 +323,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
         "systemctl start docker && systemctl enable docker",
         "pip3 install h2 hyper requests",
 
-        // Install grpcurl and prepare directories
+        // Create directories
         "mkdir -p /opt/{llm-service,health-proxy/certs} /var/log",
         "curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz | tar -xz -C /usr/local/bin grpcurl",
 
@@ -293,453 +354,35 @@ EOF`,
         // Login to ECR
         `aws ecr get-login-password --region ${this.region} | docker login --username AWS --password-stdin ${this.account}.dkr.ecr.${this.region}.amazonaws.com`,
 
-        // Combined container start script
-        `cat > /opt/llm-service/start.sh << 'EOF'
-#!/bin/bash
-# Get instance ID for logging
-INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+        // Download scripts from S3
+        `aws s3 cp s3://${scriptsBucket.bucketName}/start.sh /opt/llm-service/start.sh`,
+        `aws s3 cp s3://${scriptsBucket.bucketName}/health.py /opt/health-proxy/health.py`,
+        `aws s3 cp s3://${scriptsBucket.bucketName}/watchdog.sh /opt/llm-service/watchdog.sh`,
 
-# Create network
-docker network create llm-network 2>/dev/null || true
+        // Set executable permissions
+        "chmod +x /opt/llm-service/start.sh /opt/health-proxy/health.py /opt/llm-service/watchdog.sh",
 
-# Start Ollama
-docker run -d --name ollama --restart always --network llm-network \
-  -v ollama-data:/root/.ollama \
-  -p 11434:11434 \
-  --log-driver=awslogs \
-  --log-opt awslogs-group=${logGroup.logGroupName} \
-  --log-opt awslogs-region=${this.region} \
-  --log-opt awslogs-stream="$INSTANCE_ID/ollama" \
-  ollama/ollama:latest
-
-echo "Waiting for Ollama to initialize..."
-sleep 10
-
-# Pull the model first (with retries) before starting the LLM service
-MODEL_NAME="${modelName}"
-MAX_ATTEMPTS=3
-ATTEMPT=1
-
-while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-  echo "Pulling model $MODEL_NAME (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
-  if docker exec ollama ollama pull $MODEL_NAME; then
-    echo "Model pulled successfully"
-    # Explicitly serve the model
-    echo "Starting to serve the model..."
-    docker exec -d ollama ollama serve $MODEL_NAME
-    break
-  else
-    echo "Model pull attempt $ATTEMPT failed"
-    if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-      echo "Failed to pull model after $MAX_ATTEMPTS attempts"
-    else
-      echo "Retrying in 10 seconds..."
-      sleep 10
-    fi
-    ATTEMPT=$((ATTEMPT+1))
-  fi
-done
-
-# Start LLM Service
-docker run -d --name llm-service --restart always --network llm-network \
-  -p ${llmServicePort}:${llmServicePort} \
-  -e PORT=${llmServicePort} \
-  -e WORKER_THREADS=10 \
-  -e OLLAMA_URL=http://ollama:11434 \
-  -e MODEL_NAME=$MODEL_NAME \
-  -e LOG_LEVEL=INFO \
-  -e REFLECTION_ENABLED=true \
-  -e GRPC_ENABLE_HTTP2=1 \
-  -e GRPC_KEEPALIVE_TIME_MS=30000 \
-  -e GRPC_KEEPALIVE_TIMEOUT_MS=20000 \
-  -e GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS=1 \
-  -e GRPC_HTTP2_MIN_SENT_PING_INTERVAL_WITHOUT_DATA_MS=30000 \
-  -e GRPC_HTTP2_MAX_PINGS_WITHOUT_DATA=0 \
-  -e STICKY_SESSION_COOKIE=LlmServiceStickiness \
-  --log-driver=awslogs \
-  --log-opt awslogs-group=${logGroup.logGroupName} \
-  --log-opt awslogs-region=${this.region} \
-  --log-opt awslogs-stream="$INSTANCE_ID/llm-service" \
-  ${this.account}.dkr.ecr.${this.region}.amazonaws.com/llm-service:latest
-
-echo "Service deployment complete"
-EOF`,
-        "chmod +x /opt/llm-service/start.sh",
-        "cd /opt/llm-service && ./start.sh &",
-
-        // Simple health check script
-        `cat > /opt/health-proxy/health.py << 'EOF'
-#!/usr/bin/env python3
-import http.server, socketserver, subprocess, json, uuid, requests, os
-from http.cookies import SimpleCookie
-
-PORT = 80
-GRPC_PORT = ${llmServicePort}
-COOKIE_NAME = "LlmServiceStickiness"
-
-# First install HTTP/2 support libraries
-os.system("pip3 install h2 hyper")
-
-# Standard HTTP/1.1 handler
-class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, format, *args): pass
-    
-    def do_GET(self):
-        if self.path == '/health':
-            try:
-                # First check if the gRPC port is open
-                import socket
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                try:
-                    s.connect(('localhost', GRPC_PORT))
-                    port_open = True
-                except Exception:
-                    port_open = False
-                finally:
-                    s.close()
-                
-                # Try standard reflection first
-                try:
-                    grpc_check = subprocess.run(["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"], 
-                                           capture_output=True, timeout=2).returncode == 0
-                except:
-                    grpc_check = False
-                
-                # If reflection fails, try direct healthcheck method if available
-                if not grpc_check and port_open:
-                    try:
-                        direct_check = subprocess.run(["grpcurl", "-plaintext", "-d", '{}', f"localhost:{GRPC_PORT}", "llm.LLMService.HealthCheck"], 
-                                           capture_output=True, timeout=2).returncode == 0
-                        grpc_check = direct_check
-                    except:
-                        pass
-                
-                # Check Ollama directly from Python
-                ollama_check = False
-                try:
-                    response = requests.get("http://localhost:11434/api/tags", timeout=2)
-                    ollama_check = response.status_code == 200
-                except Exception:
-                    ollama_check = False
-                
-                # If port is open but reflection API fails, consider service potentially healthy
-                if port_open and (grpc_check or ollama_check):
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json')
-                    self._set_cookie()
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        "status": "healthy",
-                        "grpc_port_open": port_open,
-                        "grpc_reflection": grpc_check,
-                        "ollama_status": ollama_check
-                    }).encode())
-                else:
-                    self.send_response(503)
-                    self.send_header('Content-Type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        "status": "unhealthy",
-                        "grpc_port_open": port_open,
-                        "grpc_reflection": grpc_check,
-                        "ollama_status": ollama_check
-                    }).encode())
-            except Exception as e:
-                self.send_response(503)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "status": "error",
-                    "error": str(e)
-                }).encode())
-        else:
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self._set_cookie()
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok"}')
-    
-    def _set_cookie(self):
-        if 'Cookie' in self.headers:
-            cookies = SimpleCookie(self.headers['Cookie'])
-            if COOKIE_NAME in cookies: return
-        self.send_header('Set-Cookie', f'{COOKIE_NAME}={uuid.uuid4()}; Path=/; Max-Age=900; HttpOnly')
-
-# Create a more robust HTTP/2 capable server
-def create_h2_server():
-    # First try to create an HTTP/2 server using h2 library
-    try:
-        import socket
-        import ssl
-        import time
-        import threading
-        from h2.config import H2Configuration
-        from h2.connection import H2Connection
-        from h2.events import (
-            RequestReceived, DataReceived, StreamEnded
-        )
-        
-        # Check service health
-        def check_health():
-            # First check if the gRPC port is open
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                s.connect(('localhost', GRPC_PORT))
-                port_open = True
-            except Exception:
-                port_open = False
-            finally:
-                s.close()
-            
-            # Try standard reflection first
-            try:
-                grpc_check = subprocess.run(["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"], 
-                                    capture_output=True, timeout=2).returncode == 0
-            except:
-                grpc_check = False
-            
-            # Check Ollama directly from Python
-            ollama_check = False
-            try:
-                response = requests.get("http://localhost:11434/api/tags", timeout=2)
-                ollama_check = response.status_code == 200
-            except Exception:
-                ollama_check = False
-                
-            return (port_open and (grpc_check or ollama_check))
-        
-        # Handle a single HTTP/2 connection
-        def handle_h2_connection(sock, address):
-            config = H2Configuration(client_side=False)
-            conn = H2Connection(config=config)
-            conn.initiate_connection()
-            sock.sendall(conn.data_to_send())
-            
-            try:
-                while True:
-                    data = sock.recv(65535)
-                    if not data:
-                        break
-                        
-                    events = conn.receive_data(data)
-                    
-                    for event in events:
-                        if isinstance(event, RequestReceived):
-                            stream_id = event.stream_id
-                            headers = dict(event.headers)
-                            path = headers.get(b':path', b'/').decode('utf-8')
-                            
-                            if path == '/health':
-                                is_healthy = check_health()
-                                status = 200 if is_healthy else 503
-                                message = b'{"status":"healthy"}' if is_healthy else b'{"status":"unhealthy"}'
-                            else:
-                                status = 200
-                                message = b'{"status":"ok"}'
-                                
-                            response_headers = [
-                                (b':status', str(status).encode('utf-8')),
-                                (b'content-type', b'application/json'),
-                                (b'content-length', str(len(message)).encode('utf-8')),
-                                (b'server', b'health-proxy-h2'),
-                            ]
-                            
-                            # Add cookie header for session stickiness
-                            cookie_header = f'{COOKIE_NAME}={uuid.uuid4()}; Path=/; Max-Age=900; HttpOnly'.encode('utf-8')
-                            response_headers.append((b'set-cookie', cookie_header))
-                            
-                            conn.send_headers(stream_id, response_headers)
-                            conn.send_data(stream_id, message, end_stream=True)
-                            
-                    sock.sendall(conn.data_to_send())
-            except (ConnectionError, OSError):
-                pass
-            finally:
-                sock.close()
-        
-        # Start HTTP/2 server
-        sock = socket.socket()
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(('', PORT))
-        sock.listen(5)
-        
-        print(f"Starting HTTP/2 server on port {PORT}...")
-        
-        # Accept connections in a loop
-        while True:
-            client, addr = sock.accept()
-            client_thread = threading.Thread(target=handle_h2_connection, args=(client, addr))
-            client_thread.daemon = True
-            client_thread.start()
-            
-    except ImportError as e:
-        print(f"Error importing HTTP/2 libraries: {e}")
-        print("Falling back to HTTP/1.1 server")
-        # Fall back to standard HTTP server
-        httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
-        print(f"HTTP/1.1 health check server started on port {PORT}")
-        httpd.serve_forever()
-        
-    except Exception as e:
-        print(f"Error starting HTTP/2 server: {e}")
-        print("Falling back to HTTP/1.1 server")
-        # Fall back to standard HTTP server
-        httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
-        print(f"HTTP/1.1 health check server started on port {PORT}")
-        httpd.serve_forever()
-            
-if __name__ == "__main__":
-    try:
-        # Try HTTP/2 first
-        create_h2_server()
-    except Exception as e:
-        print(f"Error in HTTP/2 server: {e}")
-        print("Falling back to HTTP/1.1 server")
-        # Fall back to HTTP/1.1 server if anything fails
-        httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
-        print(f"HTTP/1.1 health check server started on port {PORT}")
-        httpd.serve_forever()
-EOF`,
-        "chmod +x /opt/health-proxy/health.py",
-
-        // Simple watchdog script
-        `cat > /opt/llm-service/watchdog.sh << 'EOF'
-#!/bin/bash
-
-# Counter to track consecutive failures
-OLLAMA_FAILS=0
-LLM_SERVICE_FAILS=0
-MAX_FAILS=3
-CHECK_INTERVAL=300  # Check every 5 minutes instead of every minute
-MODEL_NAME="${modelName}"
-
-while true; do
-  # Check if Ollama container is running
-  if ! docker ps | grep -q "ollama"; then
-    echo "$(date): Ollama container not running, starting it..."
-    docker start ollama 2>/dev/null || true
-    sleep 10  # Give more time to initialize
-  else
-    # Check Ollama API health
-    if curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
-      # Reset failure counter on success
-      OLLAMA_FAILS=0
-      echo "$(date): Ollama is healthy"
-      
-      # Check if model is loaded and being served
-      MODEL_CHECK=$(curl -s http://localhost:11434/api/tags | grep -c "$MODEL_NAME" || echo "0")
-      if [ "$MODEL_CHECK" -eq "0" ]; then
-        echo "$(date): Model $MODEL_NAME is not loaded, serving it now..."
-        docker exec ollama ollama pull $MODEL_NAME >/dev/null 2>&1
-        docker exec -d ollama ollama serve $MODEL_NAME
-      fi
-    else
-      OLLAMA_FAILS=$((OLLAMA_FAILS+1))
-      echo "$(date): Ollama health check failed ($OLLAMA_FAILS/$MAX_FAILS)"
-      
-      # Only restart after consecutive failures
-      if [ $OLLAMA_FAILS -ge $MAX_FAILS ]; then
-        echo "$(date): Restarting Ollama after $MAX_FAILS consecutive failures"
-        docker restart ollama 2>/dev/null || true
-        OLLAMA_FAILS=0
-        sleep 15  # Give more time to restart
-        
-        # Make sure model is loaded after restart
-        echo "$(date): Ensuring model is loaded after restart..."
-        docker exec ollama ollama pull $MODEL_NAME >/dev/null 2>&1
-        docker exec -d ollama ollama serve $MODEL_NAME
-      fi
-    fi
-  fi
-  
-  # Check if LLM service container is running
-  if ! docker ps | grep -q "llm-service"; then
-    echo "$(date): LLM service container not running, starting it..."
-    docker start llm-service 2>/dev/null || true
-    sleep 10  # Give more time to initialize
-  else
-    # Check LLM Service health - first try basic connectivity
-    if nc -z localhost ${llmServicePort} &>/dev/null; then
-      # Port is open, which is a good first sign
-      # Try the healthcheck script in the container itself
-      if docker exec llm-service /healthcheck.sh &>/dev/null; then
-        LLM_SERVICE_FAILS=0
-        echo "$(date): LLM service is healthy (healthcheck.sh passed)"
-      # Fall back to trying direct gRPC checks
-      elif grpcurl -plaintext localhost:${llmServicePort} list llm.LLMService &>/dev/null; then
-        LLM_SERVICE_FAILS=0
-        echo "$(date): LLM service reflection API is working"
-      elif grpcurl -plaintext -d "{}" localhost:${llmServicePort} llm.LLMService/HealthCheck &>/dev/null; then
-        LLM_SERVICE_FAILS=0
-        echo "$(date): LLM service direct health check succeeded"
-      else
-        LLM_SERVICE_FAILS=$((LLM_SERVICE_FAILS+1))
-        echo "$(date): LLM service health check failed ($LLM_SERVICE_FAILS/$MAX_FAILS) - port is open but service is not responding"
-        
-        # Only restart after consecutive failures
-        if [ $LLM_SERVICE_FAILS -ge $MAX_FAILS ]; then
-          echo "$(date): Restarting LLM service after $MAX_FAILS consecutive failures"
-          docker restart llm-service 2>/dev/null || true
-          LLM_SERVICE_FAILS=0
-          sleep 15  # Give more time to restart
-        fi
-      fi
-    else
-      LLM_SERVICE_FAILS=$((LLM_SERVICE_FAILS+1))
-      echo "$(date): LLM service port ${llmServicePort} is not responding ($LLM_SERVICE_FAILS/$MAX_FAILS)"
-      
-      # Only restart after consecutive failures
-      if [ $LLM_SERVICE_FAILS -ge $MAX_FAILS ]; then
-        echo "$(date): Restarting LLM service after $MAX_FAILS consecutive failures"
-        docker restart llm-service 2>/dev/null || true
-        LLM_SERVICE_FAILS=0
-        sleep 15  # Give more time to restart
-      fi
-    fi
-  fi
-  
-  sleep $CHECK_INTERVAL
-done
-EOF`,
-        "chmod +x /opt/llm-service/watchdog.sh",
-
-        // Create systemd services with minimal config
+        // Create systemd service files
         `cat > /etc/systemd/system/health-proxy.service << 'EOF'
-[Unit]
-Description=HTTP/2 Health Check Proxy
-After=docker.service network.target
-Requires=docker.service
-
-[Service]
-Type=simple
-ExecStartPre=/bin/bash -c "pip3 install -U h2 hyper requests"
-ExecStart=/usr/bin/python3 /opt/health-proxy/health.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+${healthProxyService}
 EOF`,
 
         `cat > /etc/systemd/system/container-watchdog.service << 'EOF'
-[Unit]
-Description=Container Watchdog
-After=docker.service
-Requires=docker.service
-
-[Service]
-ExecStart=/opt/llm-service/watchdog.sh
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
+${containerWatchdogService}
 EOF`,
 
-        // Enable and start services
+        // Set environment variables and run startup script
+        `export MODEL_NAME="${modelName}"`,
+        `export PORT="${llmServicePort}"`,
+        `export LOG_GROUP_NAME="${logGroup.logGroupName}"`,
+        `export REGION="${this.region}"`,
+        `export ECR_REPO="${this.account}.dkr.ecr.${this.region}.amazonaws.com"`,
+        "cd /opt/llm-service && ./start.sh || exit 1", // Fail the instance if script fails
+
+        // Start the monitoring services
         "systemctl daemon-reload",
         "systemctl enable health-proxy container-watchdog",
-        "systemctl start health-proxy container-watchdog"
+        "systemctl start health-proxy container-watchdog || exit 1" // Fail if services can't start
       );
 
       /**
@@ -881,6 +524,12 @@ EOF`,
         value: certificateDomain,
         description: "The domain name used for the LLM service",
         exportName: "DeepseekLlmServiceDomain",
+      });
+
+      new cdk.CfnOutput(this, "ScriptsBucketName", {
+        value: scriptsBucket.bucketName,
+        description: "The name of the S3 bucket containing the service scripts",
+        exportName: "DeepseekLlmServiceScriptsBucketName",
       });
     } catch (error) {
       console.error("Error retrieving SSM parameters:", error);
