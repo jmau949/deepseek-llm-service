@@ -369,13 +369,11 @@ EOF`,
         // Simple health check script
         `cat > /opt/health-proxy/health.py << 'EOF'
 #!/usr/bin/env python3
-import http.server, socketserver, subprocess, json, ssl, uuid, requests
+import http.server, socketserver, subprocess, json, uuid, requests
 from http.cookies import SimpleCookie
 
-PORT = 443
+PORT = 80
 GRPC_PORT = ${llmServicePort}
-CERT_PATH = "/opt/health-proxy/certs/server.crt"
-KEY_PATH = "/opt/health-proxy/certs/server.key"
 COOKIE_NAME = "LlmServiceStickiness"
 
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
@@ -460,19 +458,12 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         if 'Cookie' in self.headers:
             cookies = SimpleCookie(self.headers['Cookie'])
             if COOKIE_NAME in cookies: return
-        self.send_header('Set-Cookie', f'{COOKIE_NAME}={uuid.uuid4()}; Path=/; Max-Age=900; Secure; HttpOnly')
+        self.send_header('Set-Cookie', f'{COOKIE_NAME}={uuid.uuid4()}; Path=/; Max-Age=900; HttpOnly')
 
 if __name__ == "__main__":
-    # Generate self-signed cert
-    import os
-    if not os.path.exists(CERT_PATH):
-        os.system(f'openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 -subj "/CN=localhost" -keyout {KEY_PATH} -out {CERT_PATH}')
-    
     # Run server
     httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
-    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(CERT_PATH, KEY_PATH)
-    httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
+    print(f"HTTP health check server started on port {PORT}")
     httpd.serve_forever()
 EOF`,
         "chmod +x /opt/health-proxy/health.py",

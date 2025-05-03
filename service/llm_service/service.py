@@ -86,7 +86,7 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
             # Set session cookie in metadata for sticky sessions
             if self.config.sticky_session_enabled and session_id:
                 context.set_trailing_metadata([
-                    ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
+                    ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; HttpOnly')
                 ])
             
             # Map gRPC request parameters to Ollama parameters
@@ -126,7 +126,7 @@ class LLMService(llm_pb2_grpc.LLMServiceServicer):
             # Set session cookie in metadata for sticky sessions
             if self.config.sticky_session_enabled and session_id:
                 context.set_trailing_metadata([
-                    ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
+                    ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; HttpOnly')
                 ])
             
             # Map gRPC request parameters to Ollama parameters

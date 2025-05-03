@@ -90,7 +90,7 @@ def GenerateStream(self, request, context):
     # Set session cookie in metadata for sticky sessions
     if self.config.sticky_session_enabled and session_id:
         context.set_trailing_metadata([
-            ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; Secure; HttpOnly')
+            ('set-cookie', f'{self.config.sticky_session_cookie}={session_id}; Path=/; Max-Age=900; HttpOnly')
         ])
     
     # Process request...
@@ -129,7 +129,7 @@ The sticky session implementation is designed to work with AWS Application Load 
 
 - The ALB is configured with app-cookie stickiness using the cookie name "LlmServiceStickiness"
 - The service reads cookies from incoming gRPC metadata and sets them in trailing metadata
-- Session cookies are returned with HTTPS security attributes (Secure, HttpOnly)
+- Session cookies are returned with HTTP security attributes (HttpOnly)
 - 15-minute expiration matches the ALB configuration
 
 ## HTTPS Health Check Bridge
@@ -140,6 +140,14 @@ The service includes a custom HTTPS-to-gRPC health check bridge that allows the 
 2. **Self-Signed Certificate**: For TLS encryption of health check requests
 3. **gRPC Status Check**: Proxies health requests to the gRPC service using grpcurl
 4. **Cookie Support**: Sets sticky session cookies in health check responses
+
+## HTTP Health Check Bridge
+
+The service includes a custom HTTP-to-gRPC health check bridge that allows the AWS ALB to monitor the gRPC service:
+
+1. **HTTP Health Check Endpoint**: A lightweight Python HTTP server that listens on port 80
+2. **gRPC Status Check**: Proxies health requests to the gRPC service using grpcurl
+3. **Cookie Support**: Sets sticky session cookies in health check responses
 
 ## Prerequisites
 
@@ -266,7 +274,7 @@ The service offers extensive configuration through environment variables:
 When deployed to AWS, the service automatically:
 
 1. Registers with an Application Load Balancer via Auto Scaling Groups
-2. Serves HTTPS health checks on port 443 for ALB health monitoring
+2. Serves HTTP health checks on port 80 for ALB health monitoring
 3. Implements sticky sessions using the specified cookie name
 4. Uses HTTP/2 with proper settings for gRPC over ALB
 5. Supports trailing metadata for cookie setting
