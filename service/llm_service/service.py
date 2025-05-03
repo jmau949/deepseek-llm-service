@@ -243,8 +243,8 @@ def serve(config: Config):
         # HTTP/2 settings for ALB
         ('grpc.http2.min_time_between_pings_ms', 10000),
         ('grpc.http2.max_pings_without_data', 0),
-        ('grpc.keepalive_time_ms', 30000),
-        ('grpc.keepalive_timeout_ms', 10000),
+        ('grpc.keepalive_time_ms', config.keepalive_time_ms),
+        ('grpc.keepalive_timeout_ms', config.keepalive_timeout_ms),
         ('grpc.keepalive_permit_without_calls', 1),
         ('grpc.http2.max_ping_strikes', 0),
     ]

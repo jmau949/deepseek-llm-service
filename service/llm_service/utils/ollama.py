@@ -31,7 +31,7 @@ class OllamaClient:
     - Error handling and retries
     """
     
-    def __init__(self, base_url: str, model_name: str, timeout: int = 30):
+    def __init__(self, base_url: str, model_name: str, timeout: int = 300):
         """
         Initialize the Ollama client.
         

@@ -28,7 +28,7 @@ class Config:
     # Ollama settings
     ollama_url: str = "http://localhost:11434"
     model_name: str = "model-name"
-    request_timeout: int = 30
+    request_timeout: int = 300
     
     # LLM default parameters
     default_temperature: float = 0.7
@@ -44,8 +44,8 @@ class Config:
     # gRPC HTTP/2 settings for use with AWS ALB
     http2_min_ping_interval_ms: int = 10000
     http2_max_pings_without_data: int = 0
-    keepalive_time_ms: int = 30000
-    keepalive_timeout_ms: int = 10000
+    keepalive_time_ms: int = 300000
+    keepalive_timeout_ms: int = 60000
     keepalive_permit_without_calls: bool = True
     
     # Logging settings
