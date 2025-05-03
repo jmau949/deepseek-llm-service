@@ -260,6 +260,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
       userData.addCommands(
         "yum update -y && yum install -y docker amazon-cloudwatch-agent python3 python3-pip curl nc netcat",
         "systemctl start docker && systemctl enable docker",
+        "pip3 install h2 hyper requests",
 
         // Install grpcurl and prepare directories
         "mkdir -p /opt/{llm-service,health-proxy/certs} /var/log",
@@ -369,13 +370,17 @@ EOF`,
         // Simple health check script
         `cat > /opt/health-proxy/health.py << 'EOF'
 #!/usr/bin/env python3
-import http.server, socketserver, subprocess, json, uuid, requests
+import http.server, socketserver, subprocess, json, uuid, requests, os
 from http.cookies import SimpleCookie
 
 PORT = 80
 GRPC_PORT = ${llmServicePort}
 COOKIE_NAME = "LlmServiceStickiness"
 
+# First install HTTP/2 support libraries
+os.system("pip3 install h2 hyper")
+
+# Standard HTTP/1.1 handler
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
     
@@ -460,11 +465,141 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
             if COOKIE_NAME in cookies: return
         self.send_header('Set-Cookie', f'{COOKIE_NAME}={uuid.uuid4()}; Path=/; Max-Age=900; HttpOnly')
 
+# Create a more robust HTTP/2 capable server
+def create_h2_server():
+    # First try to create an HTTP/2 server using h2 library
+    try:
+        import socket
+        import ssl
+        import time
+        import threading
+        from h2.config import H2Configuration
+        from h2.connection import H2Connection
+        from h2.events import (
+            RequestReceived, DataReceived, StreamEnded
+        )
+        
+        # Check service health
+        def check_health():
+            # First check if the gRPC port is open
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.connect(('localhost', GRPC_PORT))
+                port_open = True
+            except Exception:
+                port_open = False
+            finally:
+                s.close()
+            
+            # Try standard reflection first
+            try:
+                grpc_check = subprocess.run(["grpcurl", "-plaintext", f"localhost:{GRPC_PORT}", "list", "llm.LLMService"], 
+                                    capture_output=True, timeout=2).returncode == 0
+            except:
+                grpc_check = False
+            
+            # Check Ollama directly from Python
+            ollama_check = False
+            try:
+                response = requests.get("http://localhost:11434/api/tags", timeout=2)
+                ollama_check = response.status_code == 200
+            except Exception:
+                ollama_check = False
+                
+            return (port_open and (grpc_check or ollama_check))
+        
+        # Handle a single HTTP/2 connection
+        def handle_h2_connection(sock, address):
+            config = H2Configuration(client_side=False)
+            conn = H2Connection(config=config)
+            conn.initiate_connection()
+            sock.sendall(conn.data_to_send())
+            
+            try:
+                while True:
+                    data = sock.recv(65535)
+                    if not data:
+                        break
+                        
+                    events = conn.receive_data(data)
+                    
+                    for event in events:
+                        if isinstance(event, RequestReceived):
+                            stream_id = event.stream_id
+                            headers = dict(event.headers)
+                            path = headers.get(b':path', b'/').decode('utf-8')
+                            
+                            if path == '/health':
+                                is_healthy = check_health()
+                                status = 200 if is_healthy else 503
+                                message = b'{"status":"healthy"}' if is_healthy else b'{"status":"unhealthy"}'
+                            else:
+                                status = 200
+                                message = b'{"status":"ok"}'
+                                
+                            response_headers = [
+                                (b':status', str(status).encode('utf-8')),
+                                (b'content-type', b'application/json'),
+                                (b'content-length', str(len(message)).encode('utf-8')),
+                                (b'server', b'health-proxy-h2'),
+                            ]
+                            
+                            # Add cookie header for session stickiness
+                            cookie_header = f'{COOKIE_NAME}={uuid.uuid4()}; Path=/; Max-Age=900; HttpOnly'.encode('utf-8')
+                            response_headers.append((b'set-cookie', cookie_header))
+                            
+                            conn.send_headers(stream_id, response_headers)
+                            conn.send_data(stream_id, message, end_stream=True)
+                            
+                    sock.sendall(conn.data_to_send())
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                sock.close()
+        
+        # Start HTTP/2 server
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('', PORT))
+        sock.listen(5)
+        
+        print(f"Starting HTTP/2 server on port {PORT}...")
+        
+        # Accept connections in a loop
+        while True:
+            client, addr = sock.accept()
+            client_thread = threading.Thread(target=handle_h2_connection, args=(client, addr))
+            client_thread.daemon = True
+            client_thread.start()
+            
+    except ImportError as e:
+        print(f"Error importing HTTP/2 libraries: {e}")
+        print("Falling back to HTTP/1.1 server")
+        # Fall back to standard HTTP server
+        httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
+        print(f"HTTP/1.1 health check server started on port {PORT}")
+        httpd.serve_forever()
+        
+    except Exception as e:
+        print(f"Error starting HTTP/2 server: {e}")
+        print("Falling back to HTTP/1.1 server")
+        # Fall back to standard HTTP server
+        httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
+        print(f"HTTP/1.1 health check server started on port {PORT}")
+        httpd.serve_forever()
+            
 if __name__ == "__main__":
-    # Run server
-    httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
-    print(f"HTTP health check server started on port {PORT}")
-    httpd.serve_forever()
+    try:
+        # Try HTTP/2 first
+        create_h2_server()
+    except Exception as e:
+        print(f"Error in HTTP/2 server: {e}")
+        print("Falling back to HTTP/1.1 server")
+        # Fall back to HTTP/1.1 server if anything fails
+        httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
+        print(f"HTTP/1.1 health check server started on port {PORT}")
+        httpd.serve_forever()
 EOF`,
         "chmod +x /opt/health-proxy/health.py",
 
@@ -572,13 +707,16 @@ EOF`,
         // Create systemd services with minimal config
         `cat > /etc/systemd/system/health-proxy.service << 'EOF'
 [Unit]
-Description=Health Check Proxy
-After=docker.service
+Description=HTTP/2 Health Check Proxy
+After=docker.service network.target
 Requires=docker.service
 
 [Service]
+Type=simple
+ExecStartPre=/bin/bash -c "pip3 install -U h2 hyper requests"
 ExecStart=/usr/bin/python3 /opt/health-proxy/health.py
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
