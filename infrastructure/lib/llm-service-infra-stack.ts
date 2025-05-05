@@ -488,8 +488,8 @@ EOF`,
 
       asg.scaleOnSchedule("ScaleUpAtNineAM", {
         schedule: autoscaling.Schedule.cron({ hour: "15", minute: "0" }),
-        minCapacity: 0,
-        maxCapacity: 0,
+        minCapacity: 1,
+        maxCapacity: 1,
       });
 
       /**
