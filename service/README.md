@@ -193,7 +193,7 @@ docker build -t llm-service:latest .
 
 # Run with the specified model and sticky sessions enabled
 
-docker run -p 127.0.0.1:50051:50051 -e MODEL_NAME="deepseek-r1:1.5b" -e STICKY_SESSION_ENABLED="true" -e STICKY_SESSION_COOKIE="LlmServiceStickiness" -e OLLAMA_URL="http://host.docker.internal:11434" -e PORT=50051 -e HOST=0.0.0.0 llm-service:latest
+docker run -p 127.0.0.1:50051:50051 -e MODEL_NAME="deepseek-r1" -e STICKY_SESSION_ENABLED="true" -e STICKY_SESSION_COOKIE="LlmServiceStickiness" -e OLLAMA_URL="http://host.docker.internal:11434" -e PORT=50051 -e HOST=0.0.0.0 llm-service:latest
 ```
 
 ## Testing the Service
