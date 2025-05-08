@@ -87,6 +87,11 @@ export class CicdPipelineStack extends cdk.Stack {
               commands: [
                 "echo Logging in to Amazon ECR...",
                 "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com",
+                "echo Logging in to Docker Hub...",
+                "DOCKERHUB_SECRET=$(aws secretsmanager get-secret-value --secret-id docker-hub-credentials --query SecretString --output text)",
+                "DOCKERHUB_USERNAME=$(echo $DOCKERHUB_SECRET | jq -r .username)",
+                "DOCKERHUB_PASSWORD=$(echo $DOCKERHUB_SECRET | jq -r .password)",
+                "echo $DOCKERHUB_PASSWORD | docker login --username $DOCKERHUB_USERNAME --password-stdin docker.io",
                 "# Make sure the ECR credentials are properly configured",
                 "# Ensure we have proper AWS credentials by checking the caller identity",
                 "aws sts get-caller-identity",
@@ -205,6 +210,18 @@ export class CicdPipelineStack extends cdk.Stack {
         actions: ["secretsmanager:GetSecretValue"],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:deepseek-llm-service-pat*`,
+        ],
+      })
+    );
+
+    // Grant permissions to access the Docker Hub credentials in Secrets Manager
+    buildProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [
+          // Assumes your Docker Hub credentials secret is named 'docker-hub-credentials'
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:docker-hub-credentials`,
         ],
       })
     );
