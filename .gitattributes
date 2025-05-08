@@ -1,0 +1,9 @@
+    # Handle line endings automatically for most files
+    * text=auto
+
+    # But ensure shell scripts always have LF line endings
+    *.sh text eol=lf
+
+    # If you have other script types (e.g., Python scripts run directly)
+    # that need LF, you can add them too:
+    # *.py text eol=lf
