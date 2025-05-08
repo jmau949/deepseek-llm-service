@@ -37,7 +37,7 @@ export class LlmServiceInfraStack extends cdk.Stack {
     const serviceDiscoveryPrefix =
       props?.serviceDiscoveryPrefix || "/deepseek-llm-service";
     const llmServicePort = props?.llmServicePort || 50051;
-    const modelName = props?.modelName || "deepseek-r1:1.5b";
+    const modelName = props?.modelName || "deepseek-r1:7b";
 
     try {
       /**
