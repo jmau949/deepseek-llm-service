@@ -400,13 +400,13 @@ EOF`,
         "LlmServiceLaunchTemplate",
         {
           machineImage: ec2.MachineImage.latestAmazonLinux2(),
-          instanceType: new ec2.InstanceType("c5.2xlarge"), // GPU instance for model inference
+          instanceType: new ec2.InstanceType("g4dn.xlarge"),
           userData,
           securityGroup: llmServiceSg,
           role: instanceRole,
           spotOptions: {
             requestType: ec2.SpotRequestType.ONE_TIME,
-            maxPrice: 0.25, // Set your max price
+            maxPrice: 0.25,
           },
           blockDevices: [
             {
