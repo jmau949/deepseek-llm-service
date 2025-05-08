@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Counter to track consecutive failures
+
 OLLAMA_FAILS=0
 LLM_SERVICE_FAILS=0
 MAX_FAILS=3
