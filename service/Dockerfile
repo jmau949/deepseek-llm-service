@@ -43,7 +43,18 @@ RUN python scripts/generate_proto.py && \
 COPY llm_service/ llm_service/
 
 # Final stage
-FROM python:3.10-slim
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+# Install Python 3.10, pip, and other dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    curl \
+    unzip \
+    ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -51,7 +62,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=50051 \
     WORKER_THREADS=10 \
     OLLAMA_URL="http://localhost:11434" \
-    MODEL_NAME="model-name" \
+    MODEL_NAME="deepseek-r1:7b" \
     LOG_LEVEL="INFO" \
     # Reflection API for healthchecks
     REFLECTION_ENABLED="true" \
@@ -80,15 +91,13 @@ COPY proto/*.proto proto/
 # Create an empty __init__.py in the proto directory
 RUN mkdir -p /app/proto && touch /app/proto/__init__.py
 
-# Install grpcurl for health checks and SSL utilities for HTTPS
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    curl \
-    unzip \
-    ca-certificates \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl
+# Link python3 to python and pip3 to pip if necessary
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    ln -sf /usr/bin/pip3 /usr/bin/pip
+
+# Install grpcurl for health checks
+RUN curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl
 
 # Create health check file
 RUN echo '#!/bin/sh\n\

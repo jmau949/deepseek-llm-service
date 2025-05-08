@@ -389,7 +389,7 @@ EOF`,
        * Launch Template
        *
        * Define how EC2 instances should be launched:
-       * - Machine image (Amazon Linux 2)
+       * - Machine image (AWS Deep Learning AMI GPU PyTorch * (Amazon Linux 2) *)
        * - Instance type (GPU optimized for ML workloads)
        * - User data script
        * - Security group
@@ -399,7 +399,10 @@ EOF`,
         this,
         "LlmServiceLaunchTemplate",
         {
-          machineImage: ec2.MachineImage.latestAmazonLinux2(),
+          machineImage: ec2.MachineImage.lookup({
+            name: "Deep Learning AMI GPU PyTorch * (Amazon Linux 2) *", // Adjust version/framework as needed
+            owners: ["amazon"],
+          }),
           instanceType: new ec2.InstanceType("g4dn.xlarge"),
           userData,
           securityGroup: llmServiceSg,
