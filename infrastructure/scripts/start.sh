@@ -7,6 +7,7 @@ docker network create llm-network 2>/dev/null || true
 
 # Start Ollama
 docker run -d --name ollama --restart always --network llm-network \
+  --gpus all \  
   -v ollama-data:/root/.ollama \
   -p 11434:11434 \
   --log-driver=awslogs \
@@ -46,6 +47,7 @@ done
 
 # Start LLM Service
 docker run -d --name llm-service --restart always --network llm-network \
+  --gpus all \ 
   -p ${PORT}:${PORT} \
   -e PORT=${PORT} \
   -e WORKER_THREADS=10 \
