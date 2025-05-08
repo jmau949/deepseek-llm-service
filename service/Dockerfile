@@ -43,7 +43,7 @@ RUN python scripts/generate_proto.py && \
 COPY llm_service/ llm_service/
 
 # Final stage
-FROM nvidia/cuda:12.4.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
 # Install Python 3.10, pip, and other dependencies
 RUN apt-get update && \
@@ -56,8 +56,8 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install gRPC tools, PyYAML, and dependencies using pip for the final stage's Python environment
-RUN pip3 install --no-cache-dir protobuf==4.25.1 grpcio==1.62.0 grpcio-reflection==1.62.0 grpcio-tools==1.62.0 PyYAML==6.0.1
+# Install gRPC tools, PyYAML, requests, and dependencies using pip for the final stage's Python environment
+RUN pip3 install --no-cache-dir protobuf==4.25.1 grpcio==1.62.0 grpcio-reflection==1.62.0 grpcio-tools==1.62.0 PyYAML==6.0.1 requests==2.31.0
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
