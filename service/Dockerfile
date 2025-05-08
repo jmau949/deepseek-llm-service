@@ -43,7 +43,7 @@ RUN python scripts/generate_proto.py && \
 COPY llm_service/ llm_service/
 
 # Final stage
-FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.1-cudnn8-runtime-ubuntu22.04
 
 # Install Python 3.10, pip, and other dependencies
 RUN apt-get update && \
