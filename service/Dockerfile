@@ -56,6 +56,9 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Install gRPC tools and dependencies using pip for the final stage's Python environment
+RUN pip3 install --no-cache-dir protobuf==4.25.1 grpcio==1.62.0 grpcio-reflection==1.62.0 grpcio-tools==1.62.0
+
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
