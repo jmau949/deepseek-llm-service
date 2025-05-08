@@ -257,6 +257,10 @@ export class LlmServiceInfraStack extends cdk.Stack {
             "ecr:BatchGetImage",
             "ecr:BatchCheckLayerAvailability",
             "ecr:GetAuthorizationToken",
+            // EC2 permissions needed by some DLAMI scripts
+            "ec2:DescribeInstances",
+            "ec2:DescribeImages",
+            "ec2:CreateTags",
           ],
           resources: ["*"], // Limiting resource scope for some of these actions is not possible
         })
@@ -414,7 +418,7 @@ EOF`,
           blockDevices: [
             {
               deviceName: "/dev/xvda",
-              volume: ec2.BlockDeviceVolume.ebs(30, {
+              volume: ec2.BlockDeviceVolume.ebs(45, {
                 encrypted: true,
                 volumeType: ec2.EbsDeviceVolumeType.GP3,
               }),

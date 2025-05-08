@@ -4,5 +4,6 @@
     "us-west-2b",
     "us-west-2c",
     "us-west-2d"
-  ]
+  ],
+  "ami:account=034362047054:filters.image-type.0=machine:filters.name.0=Deep Learning AMI GPU PyTorch * (Amazon Linux 2) *:filters.state.0=available:owners.0=amazon:region=us-west-2": "ami-0dad0c005237c84f9"
 }
