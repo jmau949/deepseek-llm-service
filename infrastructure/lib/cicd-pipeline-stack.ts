@@ -152,7 +152,7 @@ export class CicdPipelineStack extends cdk.Stack {
                 "# Re-authenticate with ECR",
                 "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com",
                 "# Define function to modify Dockerfile to use ECR cache",
-                'modify_dockerfile() { if [ -f "$1" ]; then echo "Modifying Dockerfile at $1 to use ECR cache..."; sed -i.bak "s|FROM python:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/python:|g" "$1"; sed -i.bak "s|FROM node:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/node:|g" "$1"; sed -i.bak "s|FROM ubuntu:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/ubuntu:|g" "$1"; sed -i.bak "s|FROM busybox:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/busybox:|g" "$1"; echo "Modified Dockerfile:"; cat "$1"; fi; }',
+                'modify_dockerfile() { if [ -f "$1" ]; then echo "Modifying Dockerfile at $1 to use ECR cache..."; sed -i.bak "s|FROM python:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/python:|g" "$1"; sed -i.bak "s|FROM python:([^ ]*)|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/python:\\1|g" "$1"; sed -i.bak "s|FROM node:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/node:|g" "$1"; sed -i.bak "s|FROM node:([^ ]*)|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/node:\\1|g" "$1"; sed -i.bak "s|FROM ubuntu:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/ubuntu:|g" "$1"; sed -i.bak "s|FROM ubuntu:([^ ]*)|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/ubuntu:\\1|g" "$1"; sed -i.bak "s|FROM busybox:|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/busybox:|g" "$1"; sed -i.bak "s|FROM busybox:([^ ]*)|FROM $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/docker-hub/busybox:\\1|g" "$1"; echo "Modified Dockerfile:"; cat "$1"; fi; }',
                 // Replace the multi-line if statement with a single command:
                 'bash -c \'if [ -f ./service/Dockerfile ]; then echo "Dockerfile found in service directory"; cd service; echo "Changed to service directory: $(pwd)"; ls -la; modify_dockerfile Dockerfile; echo "Building Docker image with --no-cache option to avoid rate limit issues..."; docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .; docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG; elif [ -f Dockerfile ]; then echo "Dockerfile found in root directory"; modify_dockerfile Dockerfile; echo "Building Docker image with --no-cache option to avoid rate limit issues..."; docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .; docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:$LATEST_TAG; else echo "ERROR: Dockerfile not found in expected locations!"; find . -name "Dockerfile" -type f; exit 1; fi\'',
               ],
@@ -197,8 +197,6 @@ export class CicdPipelineStack extends cdk.Stack {
         resources: ["*"],
       })
     );
-
-    console.log("dummy rebuild");
 
     // Grant permissions to access the GitHub token in Secrets Manager
     buildProject.addToRolePolicy(
