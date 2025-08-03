@@ -75,11 +75,11 @@ The VPC infrastructure stack creates the foundational network components:
 The LLM Service Infrastructure Stack deploys the GPU instances that run the LLM service:
 
 ### Auto Scaling Group
-- **Instance Type**: c5.2xlarge (can be adjusted based on inference needs)
-- **AMI**: Latest Amazon Linux 2
+- **Instance Type**: g4dn.xlarge (GPU-optimized for ML workloads)
+- **AMI**: AWS Deep Learning AMI GPU PyTorch (Amazon Linux 2)
 - **Spot Instances**: Used for cost optimization with a max price of $0.25
-- **Min/Max Capacity**: 1/1 (can be adjusted for scaling)
-- **EBS Storage**: 30GB encrypted GP3 volume
+- **Min/Max Capacity**: 0/1 (scales to 0 during off-hours and weekends)
+- **EBS Storage**: 45GB encrypted GP3 volume
 - **AZ Distribution**: Deployed across multiple AZs for high availability
 
 ### Security
@@ -104,9 +104,11 @@ The LLM Service Infrastructure Stack deploys the GPU instances that run the LLM 
 
 ### Auto Scaling Policies
 - **CPU Scaling**: Target tracking policy (70% target utilization)
-- **Scheduled Scaling**: Scales down during off-hours to save costs
-  - Down at 12am Central Time (6am UTC)
-  - Up at 9am Central Time (3pm UTC)
+- **Scheduled Scaling**: Scales during business hours only to save costs
+  - **Weekdays (Monday-Friday)**:
+    - Scale UP to 1 instance at 10am PST (18:00 UTC)
+    - Scale DOWN to 0 instances at 6pm PST (02:00 UTC next day)
+  - **Weekends**: Instances remain at 0 for cost savings
 
 ## Deployment Process
 
@@ -178,10 +180,11 @@ The architecture implements end-to-end HTTPS security:
 
 You can customize the deployment by modifying:
 
-- **EC2 instance type** in `llm-service-infra-stack.ts` (currently c5.2xlarge)
+- **EC2 instance type** in `llm-service-infra-stack.ts` (currently g4dn.xlarge)
 - **Spot instance pricing** (currently max $0.25)
 - **Auto scaling parameters** (min/max capacity, scaling policies)
-- **Model name** environment variable (currently "deepseek-r1:1.5b")
+- **Business hours schedule** (currently 10am-6pm PST weekdays)
+- **Model name** environment variable (currently "deepseek-r1:7b")
 - **ALB and health check settings** (timeouts, intervals, paths)
 
 ## Security Considerations

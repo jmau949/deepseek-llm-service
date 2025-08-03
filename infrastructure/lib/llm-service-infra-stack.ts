@@ -413,7 +413,7 @@ EOF`,
           role: instanceRole,
           spotOptions: {
             requestType: ec2.SpotRequestType.ONE_TIME,
-            maxPrice: 0.25,
+            maxPrice: 0.22,
           },
           blockDevices: [
             {
@@ -483,20 +483,29 @@ EOF`,
       /**
        * Scheduled Scaling
        *
-       * Implement cost-saving measures by scaling down during off-hours:
-       * - Scale down to minimum at 12am Central Time (6am UTC)
-       * - Scale up to normal capacity at 9am Central Time (3pm UTC)
+       * Implement cost-saving measures by scaling during business hours only:
+       * - Scale up to 1 instance at 10am PST (18:00 UTC) Monday-Friday
+       * - Scale down to 0 instances at 6pm PST (02:00 UTC next day) Monday-Friday
+       * This ensures 0 instances during weekends and off-hours
        */
-      asg.scaleOnSchedule("ScaleDownAtMidnight", {
-        schedule: autoscaling.Schedule.cron({ hour: "5", minute: "0" }),
-        minCapacity: 0,
-        maxCapacity: 0,
-      });
-
-      asg.scaleOnSchedule("ScaleUpAtNineAM", {
-        schedule: autoscaling.Schedule.cron({ hour: "15", minute: "0" }),
+      asg.scaleOnSchedule("ScaleUpBusinessHours", {
+        schedule: autoscaling.Schedule.cron({ 
+          hour: "18", 
+          minute: "0", 
+          weekDay: "MON-FRI" 
+        }),
         minCapacity: 1,
         maxCapacity: 1,
+      });
+
+      asg.scaleOnSchedule("ScaleDownAfterBusinessHours", {
+        schedule: autoscaling.Schedule.cron({ 
+          hour: "2", 
+          minute: "0", 
+          weekDay: "TUE-SAT" 
+        }),
+        minCapacity: 0,
+        maxCapacity: 0,
       });
 
       /**
